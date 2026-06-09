@@ -293,7 +293,8 @@ export class KanbanView extends BasesView {
 
 		const rawHidden = this.config?.get('hiddenColumns');
 		const allHidden = isColumnOrders(rawHidden) ? rawHidden : {};
-		this._prefs.hiddenColumns = new Set(allHidden[propertyId] ?? []);
+		const hiddenKey = swimlaneScopedKey ?? propertyId;
+		this._prefs.hiddenColumns = new Set(allHidden[hiddenKey] ?? []);
 	}
 
 	/**
@@ -331,7 +332,12 @@ export class KanbanView extends BasesView {
 			swimlaneScopedKey ?? this._prefsPropertyId,
 		);
 		this._persistConfigKey('columnColors', isColumnColors, this._prefs.columnColors, this._prefsPropertyId);
-		this._persistConfigKey('hiddenColumns', isColumnOrders, Array.from(this._prefs.hiddenColumns), this._prefsPropertyId);
+		this._persistConfigKey(
+			'hiddenColumns',
+			isColumnOrders,
+			Array.from(this._prefs.hiddenColumns),
+			swimlaneScopedKey ?? this._prefsPropertyId,
+		);
 
 		if (swimlaneScopedKey) {
 			this._persistConfigKey('swimlaneOrders', isColumnOrders, this._prefs.swimlaneOrder, swimlaneScopedKey);
@@ -440,6 +446,11 @@ export class KanbanView extends BasesView {
 				const isInitialOrder = this._prefs.columnOrder.length === 0;
 				// No prior order — sort alphabetically as the initial ordering
 				this._prefs.columnOrder = isInitialOrder ? [...newValues].sort() : [...this._prefs.columnOrder, ...newValues];
+				shouldPersistColumnOrder = true;
+			}
+			// Auto-hide Archived on first appearance (not yet in columnOrder)
+			if (newValues.includes(ARCHIVED_LABEL)) {
+				this._prefs.hiddenColumns.add(ARCHIVED_LABEL);
 				shouldPersistColumnOrder = true;
 			}
 			if (shouldPersistColumnOrder) {
@@ -1476,10 +1487,21 @@ export class KanbanView extends BasesView {
 	}
 
 	private getOrderedColumnValues(liveValues: string[]): string[] {
-		if (!this._prefs.columnOrder.length) return liveValues.sort();
-		// Include all saved columns (even empty ones); append any new live values.
-		const newValues = liveValues.filter((v) => !this._prefs.columnOrder.includes(v));
-		return [...this._prefs.columnOrder, ...newValues];
+		let ordered: string[];
+		if (!this._prefs.columnOrder.length) {
+			ordered = [...liveValues].sort();
+		} else {
+			// Include all saved columns (even empty ones); append any new live values.
+			const newValues = liveValues.filter((v) => !this._prefs.columnOrder.includes(v));
+			ordered = [...this._prefs.columnOrder, ...newValues];
+		}
+		// Pin Archived to the very end, after all other values.
+		const archivedIndex = ordered.indexOf(ARCHIVED_LABEL);
+		if (archivedIndex !== -1 && archivedIndex !== ordered.length - 1) {
+			ordered.splice(archivedIndex, 1);
+			ordered.push(ARCHIVED_LABEL);
+		}
+		return ordered;
 	}
 
 	private applyCardOrder(entries: BasesEntry[], savedOrder: string[]): BasesEntry[] {

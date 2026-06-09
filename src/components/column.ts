@@ -1,5 +1,5 @@
 import type { BasesEntry } from 'obsidian';
-import { COLOR_PALETTE, CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
+import { ARCHIVED_LABEL, COLOR_PALETTE, CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
 import { createCard, computeCardFingerprint, type CardRenderCtx, type CardCallbacks } from './card.ts';
 
 export interface ColumnRenderCtx {
@@ -98,7 +98,7 @@ export function createColumn(
 		headerEl.appendChild(cb.createAddButton(value, options.swimlaneValue ?? null));
 	}
 
-	if (entries.length === 0 && options.showRemoveButton !== false) {
+	if (entries.length === 0 && options.showRemoveButton !== false && value !== ARCHIVED_LABEL) {
 		headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
 	}
 
@@ -128,7 +128,14 @@ export function patchColumnCards(
 	const columnValue = columnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE);
 	const existingRemoveBtn = headerEl?.querySelector(`.${CSS_CLASSES.COLUMN_REMOVE_BTN}`) ?? null;
 	const isInSwimlane = !!columnEl.closest(`.${CSS_CLASSES.SWIMLANE}`);
-	if (headerEl && newEntries.length === 0 && !existingRemoveBtn && columnValue && !isInSwimlane) {
+	if (
+		headerEl &&
+		newEntries.length === 0 &&
+		!existingRemoveBtn &&
+		columnValue &&
+		!isInSwimlane &&
+		columnValue !== ARCHIVED_LABEL
+	) {
 		headerEl.appendChild(createRemoveButton(ctx.doc, columnValue, () => cb.onRemoveColumn(columnValue, columnEl)));
 	} else if (newEntries.length > 0 && existingRemoveBtn) {
 		existingRemoveBtn.remove();
