@@ -1082,6 +1082,27 @@ export class KanbanView extends BasesView {
 			});
 		});
 
+		if (value !== ARCHIVED_LABEL) {
+			menu.addItem((item) => {
+				item.setTitle('Move to end');
+				item.setIcon('arrow-right');
+				item.onClick(() => {
+					// Remove value from its current position
+					const order = this._prefs.columnOrder.filter((v) => v !== value);
+					// Pin Archived absolute-last: insert before it if present
+					const archivedIndex = order.indexOf(ARCHIVED_LABEL);
+					if (archivedIndex !== -1) {
+						order.splice(archivedIndex, 0, value);
+					} else {
+						order.push(value);
+					}
+					this._prefs.columnOrder = order;
+					this._persistPrefs();
+					this.render();
+				});
+			});
+		}
+
 		menu.addSeparator();
 		this.addHiddenColumnRestoreItems(menu);
 

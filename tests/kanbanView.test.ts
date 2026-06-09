@@ -5323,3 +5323,341 @@ describe('Archived Column Behavior - Cross Flows', () => {
 		assert.strictEqual(frontmatter['status'], 'Doing', 'Cross-cell drag should write destination regardless of sort');
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Move Column To End
+// ---------------------------------------------------------------------------
+
+describe('Move Column To End', () => {
+	let scrollEl: HTMLElement;
+	let controller: any;
+	let app: any;
+
+	beforeEach(() => {
+		scrollEl = createDivWithMethods();
+		app = createMockApp();
+		MockMenu.lastInstance = null;
+	});
+
+	function setupStatusView(
+		entries = createEntriesWithStatus(),
+		options?: { columnOrder?: string[]; swimlaneBy?: BasesPropertyId | null },
+	): KanbanView {
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			if (key === 'swimlaneByProperty') return options?.swimlaneBy ?? null;
+			return null;
+		};
+		if (options?.columnOrder) {
+			controller.config.set('columnOrders', { [PROPERTY_STATUS]: options.columnOrder });
+		}
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		return view;
+	}
+
+	function getRenderedColumnValues(view: KanbanView): string[] {
+		return Array.from(view.containerEl.querySelectorAll(`.${CSS_CLASSES.COLUMN}`)).map(
+			(col) => col.getAttribute('data-column-value') ?? '',
+		);
+	}
+
+	function moveColumnToEndViaMenu(view: KanbanView, columnValue: string, columnEl: HTMLElement): void {
+		(view as any).openColumnMenu(new MouseEvent('click'), columnValue, columnEl);
+		const moveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Move to end');
+		moveItem?.onClick?.();
+	}
+
+	test('VAL-MOVECOL-001: Move to end item present for a normal column', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done'] });
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		(view as any).openColumnMenu(new MouseEvent('click'), 'To Do', toDoColumn);
+
+		const moveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Move to end');
+		assert.ok(moveItem, 'Menu should contain Move to end item');
+		assert.strictEqual(moveItem?.disabled, false, 'Move to end should not be disabled');
+	});
+
+	test('VAL-MOVECOL-002: Clicking Move to end moves the column last (no Archived)', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done'] });
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(values, ['Doing', 'Done', 'To Do'], 'To Do should be moved to the end');
+	});
+
+	test('VAL-MOVECOL-003: Moved column lands immediately before Archived when present', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Doing' }),
+			createMockBasesEntry(createMockTFile('Task 3.md'), { [PROPERTY_STATUS]: 'Done' }),
+			createMockBasesEntry(createMockTFile('Task 4.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(
+			values,
+			['Doing', 'Done', 'To Do', ARCHIVED_LABEL],
+			'To Do should be before Archived, which stays absolute-last',
+		);
+	});
+
+	test('VAL-MOVECOL-004: Moving the already-last column is a no-op (no Archived)', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done'] });
+		triggerDataUpdate(view);
+
+		const doneColumn = view.containerEl.querySelector('[data-column-value="Done"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'Done', doneColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(values, ['To Do', 'Doing', 'Done'], 'Order should remain unchanged');
+	});
+
+	test('VAL-MOVECOL-005: Moving the last non-Archived column when Archived present is a no-op', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Doing' }),
+			createMockBasesEntry(createMockTFile('Task 3.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'Doing', doingColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(
+			values,
+			['To Do', 'Doing', ARCHIVED_LABEL],
+			'Order should remain unchanged when moving the last non-Archived column',
+		);
+	});
+
+	test('VAL-MOVECOL-006: New order is persisted to config (single-axis mode)', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done'] });
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]> | null;
+		assert.deepStrictEqual(
+			savedOrders?.[PROPERTY_STATUS],
+			['Doing', 'Done', 'To Do'],
+			'New order should be persisted under the property id key',
+		);
+	});
+
+	test('VAL-MOVECOL-007: New order survives a re-render', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done'] });
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		// Trigger a fresh data update
+		triggerDataUpdate(view);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(values, ['Doing', 'Done', 'To Do'], 'Order should survive re-render');
+	});
+
+	test('VAL-MOVECOL-008: Move to end item ABSENT for the Archived column', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
+		(view as any).openColumnMenu(new MouseEvent('click'), ARCHIVED_LABEL, archivedColumn);
+
+		const moveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Move to end');
+		assert.strictEqual(moveItem, undefined, 'Move to end should not appear for Archived column');
+	});
+
+	test('VAL-MOVECOL-009: Edge - single non-Archived column with Archived is a no-op', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(
+			values,
+			['To Do', ARCHIVED_LABEL],
+			'Order should remain unchanged when only one non-Archived column exists',
+		);
+	});
+
+	test('VAL-MOVECOL-010: Edge - moving the first column to end (no Archived)', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['A', 'B', 'C'] });
+		// Override entry values to match the order
+		controller.data.data = [
+			createMockBasesEntry(createMockTFile('Task A.md'), { [PROPERTY_STATUS]: 'A' }),
+			createMockBasesEntry(createMockTFile('Task B.md'), { [PROPERTY_STATUS]: 'B' }),
+			createMockBasesEntry(createMockTFile('Task C.md'), { [PROPERTY_STATUS]: 'C' }),
+		];
+		triggerDataUpdate(view);
+
+		const aColumn = view.containerEl.querySelector('[data-column-value="A"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'A', aColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(values, ['B', 'C', 'A'], 'First column should move to end');
+	});
+
+	test('VAL-MOVECOL-011: Edge - moving the first column to end with Archived present', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'A' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'B' }),
+			createMockBasesEntry(createMockTFile('Task 3.md'), { [PROPERTY_STATUS]: 'C' }),
+			createMockBasesEntry(createMockTFile('Task 4.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['A', 'B', 'C', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const aColumn = view.containerEl.querySelector('[data-column-value="A"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'A', aColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(
+			values,
+			['B', 'C', 'A', ARCHIVED_LABEL],
+			'A should be last among non-Archived, Archived stays absolute-last',
+		);
+	});
+
+	test('VAL-MOVECOL-012: Move does not add, drop, or duplicate any column', () => {
+		const entries = createEntriesWithStatus();
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', 'Done'] });
+		triggerDataUpdate(view);
+
+		const before = getRenderedColumnValues(view).slice().sort();
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		const after = getRenderedColumnValues(view).slice().sort();
+		assert.deepStrictEqual(
+			after,
+			before,
+			'Sorted before and after should be identical — no added/removed/duplicate values',
+		);
+	});
+
+	test('VAL-MOVECOL-013: Move to end in swimlane mode reorders all lanes and persists under scoped key', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do', [PROPERTY_PRIORITY]: 'High' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Doing', [PROPERTY_PRIORITY]: 'High' }),
+			createMockBasesEntry(createMockTFile('Task 3.md'), { [PROPERTY_STATUS]: 'To Do', [PROPERTY_PRIORITY]: 'Low' }),
+			createMockBasesEntry(createMockTFile('Task 4.md'), { [PROPERTY_STATUS]: 'Doing', [PROPERTY_PRIORITY]: 'Low' }),
+		];
+		const view = setupStatusView(entries, {
+			columnOrder: ['To Do', 'Doing'],
+			swimlaneBy: PROPERTY_PRIORITY,
+		});
+		triggerDataUpdate(view);
+
+		// Move To Do to end in one lane
+		const highLaneToDo = view.containerEl.querySelector(
+			'[data-swimlane-value="High"] [data-column-value="To Do"]',
+		) as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', highLaneToDo);
+
+		// Both lanes should reflect the new order
+		const lanes = view.containerEl.querySelectorAll('.obk-swimlane');
+		lanes.forEach((lane) => {
+			const columns = lane.querySelectorAll('.obk-column');
+			const values = Array.from(columns).map((col) => col.getAttribute('data-column-value'));
+			assert.deepStrictEqual(values, ['Doing', 'To Do'], 'All lanes should reflect the moved order');
+		});
+
+		// Persisted under swimlane-scoped key
+		const scopedKey = `${PROPERTY_STATUS}\u001F${PROPERTY_PRIORITY}`;
+		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]> | null;
+		assert.deepStrictEqual(
+			savedOrders?.[PROPERTY_STATUS],
+			['Doing', 'To Do'],
+			'In swimlane mode the bare property id is still used for columnOrders (shared board-wide)',
+		);
+	});
+
+	test('VAL-CROSS-005: Move to end inserts before Archived, keeping Archived strictly last', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Doing' }),
+			createMockBasesEntry(createMockTFile('Task 3.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		// Ensure Archived is visible
+		(view as any)._prefs.hiddenColumns.delete(ARCHIVED_LABEL);
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(
+			values,
+			['Doing', 'To Do', ARCHIVED_LABEL],
+			'Moved column should be immediately before Archived',
+		);
+	});
+
+	test('VAL-CROSS-006: Move to end while Archived is hidden still keeps Archived last on reveal', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Doing' }),
+			createMockBasesEntry(createMockTFile('Task 3.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Doing', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		// Keep Archived hidden
+		(view as any)._prefs.hiddenColumns.add(ARCHIVED_LABEL);
+		triggerDataUpdate(view);
+
+		// Move To Do to end
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
+
+		// Reveal Archived
+		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		showItem?.onClick?.();
+
+		const values = getRenderedColumnValues(view);
+		assert.deepStrictEqual(
+			values,
+			['Doing', 'To Do', ARCHIVED_LABEL],
+			'After revealing Archived, it should still be absolute-last',
+		);
+	});
+});
