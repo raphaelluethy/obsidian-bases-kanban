@@ -79,6 +79,26 @@
 	background: var(--background-modifier-border-hover);
 }
 
+.obk-hidden-columns-indicator {
+	flex-shrink: 0;
+	align-self: flex-start;
+	font-size: 12px;
+	color: var(--text-muted);
+	background: var(--background-modifier-border);
+	padding: 4px 10px;
+	border-radius: 12px;
+	cursor: pointer;
+	white-space: nowrap;
+	transition:
+		background 0.1s ease,
+		color 0.1s ease;
+}
+
+.obk-hidden-columns-indicator:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
 /* Swimlane mode: stack lanes vertically. The lane body becomes the
    horizontal column flex (replacing what .obk-board does in flat mode). */
 .obk-board--with-swimlanes {
@@ -380,6 +400,7 @@
 }
 
 .obk-column-add-btn,
+.obk-column-menu-btn,
 .obk-column-remove-btn {
 	width: 24px;
 	height: 24px;
@@ -396,16 +417,20 @@
 		opacity 0.1s ease;
 }
 
-.obk-column-add-btn {
+.obk-column-add-btn,
+.obk-column-menu-btn {
 	opacity: 0.55;
 }
 
 .obk-column:hover .obk-column-add-btn,
-.obk-column-add-btn:focus-visible {
+.obk-column:hover .obk-column-menu-btn,
+.obk-column-add-btn:focus-visible,
+.obk-column-menu-btn:focus-visible {
 	opacity: 1;
 }
 
 .obk-column-add-btn:hover,
+.obk-column-menu-btn:hover,
 .obk-column-remove-btn:hover {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
@@ -414,6 +439,11 @@
 .obk-column-add-btn .svg-icon {
 	width: 16px;
 	height: 16px;
+}
+
+.obk-column-menu-btn {
+	font-size: 16px;
+	line-height: 1;
 }
 
 .obk-column-remove-btn {

@@ -79,6 +79,10 @@ export const CSS_CLASSES = {
 	COLUMN_DRAGGING: 'obk-column-dragging',
 	COLUMN_GHOST: 'obk-column-ghost',
 	COLUMN_ADD_BTN: 'obk-column-add-btn',
+	COLUMN_MENU_BTN: 'obk-column-menu-btn',
+
+	// Hidden columns restore indicator (shown when one or more columns are hidden)
+	HIDDEN_COLUMNS_INDICATOR: 'obk-hidden-columns-indicator',
 
 	// Card
 	CARD: 'obk-card',

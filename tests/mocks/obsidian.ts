@@ -304,6 +304,54 @@ export class Keymap {
 	}
 }
 
+export class Menu {
+	static lastInstance: Menu | null = null;
+
+	items: Array<{ title: string; icon?: string; disabled?: boolean; onClick?: () => void }> = [];
+
+	constructor() {
+		Menu.lastInstance = this;
+	}
+	addItem(
+		cb: (item: {
+			setTitle: (t: string) => void;
+			setIcon: (i: string) => void;
+			setDisabled: (d: boolean) => void;
+			onClick: (fn: () => void) => void;
+		}) => void,
+	): this {
+		const item = {
+			title: '',
+			icon: undefined as string | undefined,
+			disabled: false,
+			onClick: undefined as (() => void) | undefined,
+		};
+		const api = {
+			setTitle: (t: string) => {
+				item.title = t;
+			},
+			setIcon: (i: string) => {
+				item.icon = i;
+			},
+			setDisabled: (d: boolean) => {
+				item.disabled = d;
+			},
+			onClick: (fn: () => void) => {
+				item.onClick = fn;
+			},
+		};
+		cb(api);
+		this.items.push(item);
+		return this;
+	}
+	addSeparator(): this {
+		this.items.push({ title: '---' });
+		return this;
+	}
+	showAtMouseEvent(_evt: MouseEvent): void {}
+	showAtPosition(): void {}
+}
+
 export class Modal {
 	app: App;
 	containerEl: HTMLElement;

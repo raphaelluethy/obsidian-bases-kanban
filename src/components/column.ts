@@ -14,6 +14,7 @@ export interface ColumnRenderCtx {
 export interface ColumnCallbacks {
 	applyColumnColor: (columnEl: HTMLElement, colorName: string | null) => void;
 	onColorPickerClick: (anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string) => void;
+	onColumnMenu: (evt: MouseEvent, columnValue: string, columnEl: HTMLElement) => void;
 	onRemoveColumn: (columnValue: string, columnEl: HTMLElement) => void;
 	createAddButton: (columnValue: string, swimlaneValue: string | null) => HTMLElement;
 	getQuickAddFolder: () => string | null;
@@ -73,6 +74,21 @@ export function createColumn(
 	colorBtn.addEventListener('click', (e) => {
 		e.stopPropagation();
 		cb.onColorPickerClick(colorBtn, columnEl, value);
+	});
+
+	const menuBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_MENU_BTN });
+	menuBtn.setAttribute('aria-label', 'Column options');
+	menuBtn.setAttribute('role', 'button');
+	menuBtn.textContent = '⋮';
+	menuBtn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		cb.onColumnMenu(e, value, columnEl);
+	});
+
+	headerEl.addEventListener('contextmenu', (e) => {
+		e.preventDefault();
+		e.stopPropagation();
+		cb.onColumnMenu(e, value, columnEl);
 	});
 
 	headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });

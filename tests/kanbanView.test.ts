@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
 import { Notice } from 'obsidian';
+import { Menu as MockMenu } from './mocks/obsidian.ts';
 import type { BasesPropertyId } from 'obsidian';
 import {
 	CSS_CLASSES,
@@ -2371,6 +2372,136 @@ describe('Column Colors', () => {
 			'var(--color-blue)',
 			'Column CSS variable should reflect stored color',
 		);
+	});
+});
+
+describe('Hidden columns', () => {
+	let scrollEl: HTMLElement;
+	let controller: any;
+	let app: any;
+
+	beforeEach(() => {
+		scrollEl = createDivWithMethods();
+		app = createMockApp();
+		MockMenu.lastInstance = null;
+	});
+
+	function setupStatusView(entries = createEntriesWithStatus(), options?: { columnOrder?: string[] }): KanbanView {
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		if (options?.columnOrder) {
+			controller.config.set('columnOrders', { [PROPERTY_STATUS]: options.columnOrder });
+		}
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		return view;
+	}
+
+	function getRenderedColumnValues(view: KanbanView): string[] {
+		return Array.from(view.containerEl.querySelectorAll(`.${CSS_CLASSES.COLUMN}`)).map(
+			(col) => col.getAttribute('data-column-value') ?? '',
+		);
+	}
+
+	function hideColumnViaMenu(view: KanbanView, columnValue: string, columnEl: HTMLElement): void {
+		(view as any).openColumnMenu(new MouseEvent('click'), columnValue, columnEl);
+		const hideItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Hide column');
+		hideItem?.onClick?.();
+	}
+
+	function showColumnViaMenu(view: KanbanView, columnValue: string): void {
+		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${columnValue}`);
+		showItem?.onClick?.();
+	}
+
+	test('hiding a column removes it from DOM but keeps columnOrder', () => {
+		const view = setupStatusView(createEntriesWithStatus(), {
+			columnOrder: ['To Do', 'Doing', 'Done'],
+		});
+		triggerDataUpdate(view);
+
+		const doingColumn = view.containerEl.querySelector(
+			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
+		) as HTMLElement;
+		assert.ok(doingColumn, 'Doing column should exist before hide');
+
+		hideColumnViaMenu(view, 'Doing', doingColumn);
+
+		assert.ok(
+			!view.containerEl.querySelector(`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`),
+			'Doing column should be removed from DOM',
+		);
+		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Done'], 'Only visible columns should render');
+		assert.deepStrictEqual(
+			(view as any)._prefs.columnOrder,
+			['To Do', 'Doing', 'Done'],
+			'columnOrder should still include the hidden column',
+		);
+	});
+
+	test('unhiding restores column in original position', () => {
+		const view = setupStatusView(createEntriesWithStatus(), {
+			columnOrder: ['To Do', 'Doing', 'Done'],
+		});
+		triggerDataUpdate(view);
+
+		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Doing', 'Done']);
+
+		const doingColumn = view.containerEl.querySelector(
+			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
+		) as HTMLElement;
+		hideColumnViaMenu(view, 'Doing', doingColumn);
+		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Done']);
+
+		showColumnViaMenu(view, 'Doing');
+		assert.deepStrictEqual(
+			getRenderedColumnValues(view),
+			['To Do', 'Doing', 'Done'],
+			'Unhidden column should return to its original position',
+		);
+	});
+
+	test('hiddenColumns persists to config keyed by property id', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		(view as any)._prefs.hiddenColumns.add('Doing');
+		(view as any)._persistPrefs();
+
+		const savedHidden = controller.config.get('hiddenColumns') as Record<string, string[]> | null;
+		assert.ok(savedHidden, 'hiddenColumns should be saved to config');
+		assert.deepStrictEqual(savedHidden?.[PROPERTY_STATUS], ['Doing']);
+
+		const scrollEl2 = createDivWithMethods();
+		const view2 = new KanbanView(controller, scrollEl2);
+		setupKanbanViewWithApp(view2, app);
+		triggerDataUpdate(view2);
+
+		assert.ok((view2 as any)._prefs.hiddenColumns instanceof Set, 'hiddenColumns should load as a Set');
+		assert.ok((view2 as any)._prefs.hiddenColumns.has('Doing'), 'Reloaded prefs should include hidden column');
+		assert.strictEqual((view2 as any)._prefs.hiddenColumns.size, 1);
+	});
+
+	test('hidden columns indicator appears only when columns are hidden', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		assert.strictEqual(
+			view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`),
+			null,
+			'Indicator should be absent when no columns are hidden',
+		);
+
+		const doingColumn = view.containerEl.querySelector(
+			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
+		) as HTMLElement;
+		hideColumnViaMenu(view, 'Doing', doingColumn);
+
+		const indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`);
+		assert.ok(indicator, 'Indicator should appear when a column is hidden');
+		assert.strictEqual(indicator?.textContent, '1 hidden');
 	});
 });
 

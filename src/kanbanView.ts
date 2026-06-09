@@ -1,5 +1,5 @@
 import type { BasesEntry, BasesPropertyId, HoverPopover, QueryController, ViewOption } from 'obsidian';
-import { BasesView, Keymap, Notice, normalizePath, parsePropertyId } from 'obsidian';
+import { BasesView, Keymap, Menu, Notice, normalizePath, parsePropertyId } from 'obsidian';
 import {
 	createCard as createCardEl,
 	computeCardFingerprint,
@@ -133,12 +133,14 @@ export class KanbanView extends BasesView {
 		cardOrders: Record<string, string[]>;
 		columnColors: Record<string, string>;
 		collapsedLanes: Set<string>;
+		hiddenColumns: Set<string>;
 	} = {
 		columnOrder: [],
 		swimlaneOrder: [],
 		cardOrders: {},
 		columnColors: {}, // columnValue → colorName
 		collapsedLanes: new Set(),
+		hiddenColumns: new Set(),
 	};
 	private _prefsPropertyId: BasesPropertyId | null = null;
 	private _prefsSwimlanePropertyId: BasesPropertyId | null = null;
@@ -292,6 +294,10 @@ export class KanbanView extends BasesView {
 		const allSwimlaneOrders = isColumnOrders(rawSwimlaneOrders) ? rawSwimlaneOrders : {};
 		this._prefs.swimlaneOrder =
 			swimlaneScopedKey && allSwimlaneOrders[swimlaneScopedKey] ? [...allSwimlaneOrders[swimlaneScopedKey]] : [];
+
+		const rawHidden = this.config?.get('hiddenColumns');
+		const allHidden = isColumnOrders(rawHidden) ? rawHidden : {};
+		this._prefs.hiddenColumns = new Set(allHidden[propertyId] ?? []);
 	}
 
 	/**
@@ -329,6 +335,7 @@ export class KanbanView extends BasesView {
 			swimlaneScopedKey ?? this._prefsPropertyId,
 		);
 		this._persistConfigKey('columnColors', isColumnColors, this._prefs.columnColors, this._prefsPropertyId);
+		this._persistConfigKey('hiddenColumns', isColumnOrders, Array.from(this._prefs.hiddenColumns), this._prefsPropertyId);
 
 		if (swimlaneScopedKey) {
 			this._persistConfigKey('swimlaneOrders', isColumnOrders, this._prefs.swimlaneOrder, swimlaneScopedKey);
@@ -444,6 +451,7 @@ export class KanbanView extends BasesView {
 			}
 
 			const orderedValues = this.getOrderedColumnValues(liveValues);
+			const visibleValues = orderedValues.filter((v) => !this._prefs.hiddenColumns.has(v));
 
 			const currentOrderKey = JSON.stringify(this.config?.getOrder() ?? []);
 			const orderChanged = currentOrderKey !== this._lastOrderKey;
@@ -500,9 +508,9 @@ export class KanbanView extends BasesView {
 			const modeChanged = hasSwimlanes !== existingIsSwimlane;
 
 			if (!existingBoard || modeChanged || groupChanged || optionsChanged) {
-				this.fullRebuild(orderedValues, lanes, hasSwimlanes);
+				this.fullRebuild(visibleValues, lanes, hasSwimlanes);
 			} else {
-				this.patchBoard(orderedValues, lanes, hasSwimlanes);
+				this.patchBoard(visibleValues, lanes, hasSwimlanes);
 			}
 			this.reapplyActiveCard();
 		} catch (error) {
@@ -583,6 +591,8 @@ export class KanbanView extends BasesView {
 			});
 			this.swimlaneColumnSortables.set(null, this._createColumnSortable(boardEl));
 		}
+
+		this.updateHiddenColumnsIndicator(boardEl);
 	}
 
 	private _buildRowCtx(): RowRenderCtx {
@@ -812,6 +822,8 @@ export class KanbanView extends BasesView {
 				console.error('KanbanView: error restoring scroll positions', error);
 			}
 		});
+
+		this.updateHiddenColumnsIndicator(boardEl);
 	}
 
 	private _patchColumns(
@@ -997,6 +1009,7 @@ export class KanbanView extends BasesView {
 		return {
 			applyColumnColor: (el, name) => this.applyColumnColor(el, name),
 			onColorPickerClick: (anchor, col, val) => this.openColorPicker(anchor, col, val),
+			onColumnMenu: (evt, val, el) => this.openColumnMenu(evt, val, el),
 			onRemoveColumn: (val, el) => this.removeColumn(val, el),
 			createAddButton: (colVal, laneVal) => this.createAddButton(colVal, laneVal),
 			getQuickAddFolder: () => this.getQuickAddFolder(),
@@ -1040,6 +1053,69 @@ export class KanbanView extends BasesView {
 
 	private applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
 		applyColumnColorEl(columnEl, colorName);
+	}
+
+	private openColumnMenu(evt: MouseEvent, value: string, _columnEl: HTMLElement): void {
+		const menu = new Menu();
+
+		menu.addItem((item) => {
+			item.setTitle('Hide column');
+			item.setIcon('eye-off');
+			item.onClick(() => {
+				this._prefs.hiddenColumns.add(value);
+				this._persistPrefs();
+				this.render();
+			});
+		});
+
+		menu.addSeparator();
+		this.addHiddenColumnRestoreItems(menu);
+
+		menu.showAtMouseEvent(evt);
+	}
+
+	private openHiddenColumnsMenu(evt: MouseEvent): void {
+		const menu = new Menu();
+		this.addHiddenColumnRestoreItems(menu);
+		menu.showAtMouseEvent(evt);
+	}
+
+	private addHiddenColumnRestoreItems(menu: Menu): void {
+		if (this._prefs.hiddenColumns.size > 0) {
+			for (const hiddenValue of this._prefs.hiddenColumns) {
+				menu.addItem((item) => {
+					item.setTitle(`Show: ${hiddenValue}`);
+					item.setIcon('eye');
+					item.onClick(() => {
+						this._prefs.hiddenColumns.delete(hiddenValue);
+						this._persistPrefs();
+						this.render();
+					});
+				});
+			}
+		} else {
+			menu.addItem((item) => {
+				item.setTitle('No hidden columns');
+				item.setDisabled(true);
+			});
+		}
+	}
+
+	private updateHiddenColumnsIndicator(boardEl: HTMLElement): void {
+		boardEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`)?.remove();
+
+		if (this._prefs.hiddenColumns.size === 0) return;
+
+		const indicator = boardEl.createDiv({
+			cls: CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR,
+			text: `${this._prefs.hiddenColumns.size} hidden`,
+		});
+		indicator.setAttribute('role', 'button');
+		indicator.setAttribute('aria-label', 'Show hidden columns');
+		indicator.addEventListener('click', (evt) => {
+			evt.stopPropagation();
+			if (evt.instanceOf(MouseEvent)) this.openHiddenColumnsMenu(evt);
+		});
 	}
 
 	private openColorPicker(anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string): void {
