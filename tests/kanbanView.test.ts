@@ -4,6 +4,7 @@ import { Notice } from 'obsidian';
 import { Menu as MockMenu } from './mocks/obsidian.ts';
 import type { BasesPropertyId } from 'obsidian';
 import {
+	ARCHIVED_LABEL,
 	CSS_CLASSES,
 	HOVER_LINK_SOURCE_ID,
 	SORTABLE_CONFIG,
@@ -12,6 +13,7 @@ import {
 	UNCATEGORIZED_LABEL,
 } from '../src/constants.ts';
 import { isCardOrders, KanbanView } from '../src/kanbanView.ts';
+import { createCard } from '../src/components/card.ts';
 import { normalizePropertyValue } from '../src/utils/grouping.ts';
 import {
 	createEmptyEntries,
@@ -4102,5 +4104,410 @@ describe('patchColumnCards - property value reactivity', () => {
 
 		const countEl = view.containerEl.querySelector('.obk-column-count');
 		assert.strictEqual(countEl?.textContent, '1', 'Column count should remain 1 after a property-only update');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Card Archive Context Menu
+// ---------------------------------------------------------------------------
+
+describe('Card Archive Context Menu', () => {
+	let scrollEl: HTMLElement;
+	let controller: any;
+	let app: ReturnType<typeof createMockApp>;
+
+	beforeEach(() => {
+		scrollEl = createDivWithMethods();
+		app = createMockApp();
+		MockMenu.lastInstance = null;
+	});
+
+	function setupStatusView(
+		entries = createEntriesWithStatus(),
+		options?: { columnOrder?: string[]; swimlaneBy?: BasesPropertyId | null },
+	): KanbanView {
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			if (key === 'swimlaneByProperty') return options?.swimlaneBy ?? null;
+			return null;
+		};
+		if (options?.columnOrder) {
+			controller.config.set('columnOrders', { [PROPERTY_STATUS]: options.columnOrder });
+		}
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		return view;
+	}
+
+	test('ARCHIVED_LABEL constant equals Archived', () => {
+		assert.strictEqual(ARCHIVED_LABEL, 'Archived');
+	});
+
+	test('right-click on archivable card opens context menu with Archive item', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'Card should exist');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		assert.ok(MockMenu.lastInstance, 'Menu should be constructed');
+		const archiveItem = MockMenu.lastInstance!.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Menu should contain an Archive item');
+	});
+
+	test('Archive item present for normal non-archived card', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		const card = toDoColumn?.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'To Do card should exist');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Archive item should exist for a non-archived card');
+	});
+
+	test('no Archive item when no groupBy property is configured', () => {
+		// The view auto-selects the first available property when none is
+		// configured, so we exercise createCard directly with groupByPropertyId
+		// set to null to verify the handler guard.
+		const entry = createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' });
+		const card = createCard(
+			entry,
+			'To Do',
+			{
+				app: app as any,
+				doc: document,
+				groupByPropertyId: null,
+				cardTitlePropertyId: null,
+				imagePropertyId: null,
+				imageFit: 'cover',
+				imageAspectRatio: 0.5,
+				wrapValues: false,
+				order: [],
+				getDisplayName: (id: string) => id,
+			},
+			{
+				onHoverPreview: () => {},
+				onSetActiveCard: () => {},
+				onOpenInBackgroundTab: () => {},
+				onArchiveCard: () => {},
+			},
+		);
+
+		MockMenu.lastInstance = null;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.strictEqual(archiveItem, undefined, 'No Archive item when groupBy is not configured');
+	});
+
+	test('no Archive item when card is already in Archived column', () => {
+		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
+		const view = setupStatusView(entries, { columnOrder: ['Archived'] });
+		triggerDataUpdate(view);
+
+		const archivedColumn = view.containerEl.querySelector('[data-column-value="Archived"]') as HTMLElement;
+		const card = archivedColumn?.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'Archived card should exist');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.strictEqual(archiveItem, undefined, 'No Archive item for already-archived card');
+	});
+
+	test('selecting Archive calls processFrontMatter exactly once with the correct file', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		const entryPath = card.getAttribute('data-entry-path');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem?.onClick, 'Archive item should have onClick');
+		archiveItem!.onClick!();
+
+		assert.strictEqual(app.fileManager.processFrontMatter.calls.length, 1, 'processFrontMatter should be called once');
+		assert.strictEqual(
+			app.fileManager.processFrontMatter.calls[0][0].path,
+			entryPath,
+			'processFrontMatter should receive the card file',
+		);
+	});
+
+	test('Archive writes resolved groupBy property name to Archived', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		archiveItem!.onClick!();
+
+		const frontmatter: Record<string, unknown> = {};
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.strictEqual(frontmatter['status'], 'Archived', 'Frontmatter should set status to Archived');
+	});
+
+	test('written value equals ARCHIVED_LABEL constant', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		archiveItem!.onClick!();
+
+		const frontmatter: Record<string, unknown> = {};
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.strictEqual(frontmatter['status'], ARCHIVED_LABEL, 'Written value should equal ARCHIVED_LABEL');
+	});
+
+	test('archiving an Uncategorized card sets the property to Archived', () => {
+		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: null })];
+		const view = setupStatusView(entries, { columnOrder: [UNCATEGORIZED_LABEL] });
+		triggerDataUpdate(view);
+
+		const uncatColumn = view.containerEl.querySelector('[data-column-value="Uncategorized"]') as HTMLElement;
+		const card = uncatColumn?.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'Uncategorized card should exist');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Archive item should be present for Uncategorized card');
+		archiveItem!.onClick!();
+
+		const frontmatter: Record<string, unknown> = {};
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.strictEqual(frontmatter['status'], 'Archived', 'Uncategorized card should have status set to Archived');
+		assert.ok('status' in frontmatter, 'Property key should exist after archiving');
+	});
+
+	test('after data refresh the archived card moves into the Archived column', () => {
+		const file = createMockTFile('Task 1.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const toDoCard = view.containerEl.querySelector('[data-column-value="To Do"] .obk-card') as HTMLElement;
+		assert.ok(toDoCard, 'Card should start in To Do');
+
+		toDoCard.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		archiveItem!.onClick!();
+
+		// Simulate data update reflecting the new value
+		controller.data.data = [createMockBasesEntry(file, { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
+		triggerDataUpdate(view);
+
+		const archivedCard = view.containerEl.querySelector('[data-column-value="Archived"] .obk-card');
+		assert.ok(archivedCard, 'Card should now be in Archived column');
+		assert.strictEqual(
+			archivedCard?.getAttribute('data-entry-path'),
+			'Task 1.md',
+			'Archived card should have correct path',
+		);
+		assert.strictEqual(
+			view.containerEl.querySelector('[data-column-value="To Do"] .obk-card'),
+			null,
+			'To Do column should no longer contain the card',
+		);
+	});
+
+	test('no Unarchive item exists in the card menu', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const unarchiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Unarchive');
+		assert.strictEqual(unarchiveItem, undefined, 'No Unarchive item should exist');
+	});
+
+	test('no card menu shown for already-archived card', () => {
+		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
+		const view = setupStatusView(entries, { columnOrder: [ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		MockMenu.lastInstance = null;
+		const archivedCard = view.containerEl.querySelector('[data-column-value="Archived"] .obk-card') as HTMLElement;
+		assert.ok(archivedCard, 'Archived card should exist');
+
+		archivedCard.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.strictEqual(archiveItem, undefined, 'No Archive item for already-archived card');
+	});
+
+	test('archiving in swimlane mode writes only the groupBy property', () => {
+		const entries = createEntriesWithMixedProperties();
+		const view = setupStatusView(entries, {
+			columnOrder: ['To Do', 'Doing', 'Done'],
+			swimlaneBy: PROPERTY_PRIORITY,
+		});
+		triggerDataUpdate(view);
+
+		const toDoHighCard = view.containerEl.querySelector(
+			'[data-swimlane-value="High"] [data-column-value="To Do"] .obk-card',
+		) as HTMLElement;
+		assert.ok(toDoHighCard, 'Card in To Do / High lane should exist');
+
+		toDoHighCard.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Archive item should exist in swimlane mode');
+		archiveItem!.onClick!();
+
+		assert.strictEqual(app.fileManager.processFrontMatter.calls.length, 1);
+		const frontmatter: Record<string, unknown> = { priority: 'High' };
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.strictEqual(frontmatter['status'], 'Archived', 'groupBy property should be Archived');
+		assert.strictEqual(frontmatter['priority'], 'High', 'swimlane property should be preserved');
+	});
+
+	test('right-click does not open the note', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		const openCountBefore = app.workspace.openLinkText.calls.length;
+
+		const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+		card.dispatchEvent(event);
+
+		assert.strictEqual(
+			app.workspace.openLinkText.calls.length,
+			openCountBefore,
+			'openLinkText should not be called on contextmenu',
+		);
+		assert.strictEqual(event.defaultPrevented, true, 'Event default should be prevented for archivable card');
+	});
+
+	test('left-click still opens the note after contextmenu handler added', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.click();
+
+		assert.strictEqual(app.workspace.openLinkText.calls.length, 1, 'Left-click should still open the note');
+	});
+
+	test('middle-click still opens background tab after contextmenu handler added', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, button: 1 }));
+
+		assert.strictEqual(app.workspace.getLeaf.calls.length, 1, 'Middle-click should still open background tab');
+	});
+
+	test('clicking an inner anchor still bypasses card-open after contextmenu handler added', () => {
+		const entries = createEntriesWithLinks();
+		controller = createMockQueryController(entries, [PROPERTY_STATUS, PROPERTY_RELATED]);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		controller.config.getOrder = () => [PROPERTY_STATUS, PROPERTY_RELATED];
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const link = view.containerEl.querySelector('a.internal-link') as HTMLElement;
+		assert.ok(link, 'Internal link should exist');
+
+		link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+		assert.strictEqual(app.workspace.openLinkText.calls.length, 1);
+		assert.strictEqual(app.workspace.openLinkText.calls[0][0], 'Meeting Notes', 'Anchor click should open link target');
+	});
+
+	test('Archive works while a sort is active', () => {
+		const view = setupStatusView();
+		controller.config.set('sort', [{ property: 'file.mtime', direction: 'DESC' }]);
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Archive item should be present even with active sort');
+		archiveItem!.onClick!();
+
+		assert.strictEqual(app.fileManager.processFrontMatter.calls.length, 1);
+		const frontmatter: Record<string, unknown> = {};
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.strictEqual(frontmatter['status'], 'Archived');
+	});
+
+	test('card context menu reachable in swimlane mode', () => {
+		const entries = createEntriesWithMixedProperties();
+		const view = setupStatusView(entries, {
+			columnOrder: ['To Do', 'Doing', 'Done'],
+			swimlaneBy: PROPERTY_PRIORITY,
+		});
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector(
+			'[data-swimlane-value="High"] [data-column-value="To Do"] .obk-card',
+		) as HTMLElement;
+		assert.ok(card, 'Card should exist in swimlane');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		assert.ok(MockMenu.lastInstance, 'Menu should be constructed in swimlane mode');
+		const archiveItem = MockMenu.lastInstance!.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Archive item should exist in swimlane mode');
+	});
+
+	test('column hide, quick add, and drag-drop coexist with card context menu', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		controller.config.set('quickAddFolder', 'cards');
+		controller.config.set('columnOrders', { [PROPERTY_STATUS]: ['To Do', 'Doing', 'Done'] });
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		// 1. Column hide still works
+		const doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]') as HTMLElement;
+		(view as any).openColumnMenu(new MouseEvent('click'), 'Doing', doingColumn);
+		const hideItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Hide column');
+		assert.ok(hideItem, 'Hide column item should still exist');
+		hideItem!.onClick!();
+		assert.strictEqual(
+			view.containerEl.querySelector('[data-column-value="Doing"]'),
+			null,
+			'Hide column should still work',
+		);
+
+		// 2. Quick add button still exists
+		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
+		const addBtn = toDoColumn?.querySelector('.obk-column-add-btn');
+		assert.ok(addBtn, 'Quick add button should still exist');
+
+		// 3. Card context menu still works
+		const card = toDoColumn?.querySelector('.obk-card') as HTMLElement;
+		MockMenu.lastInstance = null;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		assert.ok(archiveItem, 'Archive item should still exist alongside other features');
 	});
 });

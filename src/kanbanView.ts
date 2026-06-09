@@ -1,11 +1,6 @@
 import type { BasesEntry, BasesPropertyId, HoverPopover, QueryController, ViewOption } from 'obsidian';
 import { BasesView, Keymap, Menu, Notice, normalizePath, parsePropertyId } from 'obsidian';
-import {
-	createCard as createCardEl,
-	computeCardFingerprint,
-	type CardRenderCtx,
-	type CardCallbacks,
-} from './components/card.ts';
+import { computeCardFingerprint, type CardRenderCtx, type CardCallbacks } from './components/card.ts';
 import {
 	createAddButton as createAddButtonEl,
 	createQuickAddCard as createQuickAddCardEl,
@@ -31,6 +26,7 @@ import {
 import type { TFile } from 'obsidian';
 import Sortable from 'sortablejs';
 import {
+	ARCHIVED_LABEL,
 	COLOR_PALETTE,
 	CSS_CLASSES,
 	DATA_ATTRIBUTES,
@@ -1044,11 +1040,18 @@ export class KanbanView extends BasesView {
 			onHoverPreview: (lt, sp, e, el) => this.triggerHoverPreview(lt, sp, e, el),
 			onSetActiveCard: (path) => this.setActiveCard(path),
 			onOpenInBackgroundTab: (file) => this.openInBackgroundTab(file),
+			onArchiveCard: (file) => {
+				void this.archiveCard(file);
+			},
 		};
 	}
 
-	private createCard(entry: BasesEntry): HTMLElement {
-		return createCardEl(entry, this._buildCardCtx(), this._buildCardCallbacks());
+	private async archiveCard(file: TFile): Promise<void> {
+		if (!this._prefsPropertyId || !this.app?.fileManager) return;
+		const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
+		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+			frontmatter[columnPropertyName] = ARCHIVED_LABEL;
+		});
 	}
 
 	private applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {

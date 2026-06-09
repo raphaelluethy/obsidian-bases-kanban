@@ -106,7 +106,7 @@ export function createColumn(
 	bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
 
 	entries.forEach((entry) => {
-		bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
+		bodyEl.appendChild(createCard(entry, value, ctx.card, ctx.cardCb));
 	});
 
 	return columnEl;
@@ -161,7 +161,7 @@ export function patchColumnCards(
 		if (existing && ctx.cardFingerprints.get(entry.file.path) === fp) {
 			return;
 		}
-		const newCard = createCard(entry, ctx.card, ctx.cardCb);
+		const newCard = createCard(entry, columnValue ?? '', ctx.card, ctx.cardCb);
 		ctx.cardFingerprints.set(entry.file.path, fp);
 		if (existing) {
 			body.replaceChild(newCard, existing);

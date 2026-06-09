@@ -5,6 +5,9 @@
 /** Label used for entries without a property value */
 export const UNCATEGORIZED_LABEL = 'Uncategorized';
 
+/** Label used for archived entries */
+export const ARCHIVED_LABEL = 'Archived';
+
 /** Source id registered with Obsidian's Page Preview core plugin */
 export const HOVER_LINK_SOURCE_ID = 'kanban-bases-view';
 

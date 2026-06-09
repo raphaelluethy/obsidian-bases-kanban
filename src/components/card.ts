@@ -1,7 +1,7 @@
 import type { App, BasesEntry, BasesPropertyId } from 'obsidian';
-import { Keymap, NullValue } from 'obsidian';
+import { Keymap, Menu, NullValue } from 'obsidian';
 import type { TFile } from 'obsidian';
-import { CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
+import { ARCHIVED_LABEL, CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
 
 export interface CardRenderCtx {
 	app: App;
@@ -20,6 +20,7 @@ export interface CardCallbacks {
 	onHoverPreview: (linktext: string, sourcePath: string, event: MouseEvent, targetEl: HTMLElement) => void;
 	onSetActiveCard: (path: string | null) => void;
 	onOpenInBackgroundTab: (file: TFile) => void;
+	onArchiveCard: (file: TFile, columnValue: string) => void;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -87,7 +88,7 @@ export function renderCardCover(
 	return true;
 }
 
-export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallbacks): HTMLElement {
+export function createCard(entry: BasesEntry, columnValue: string, ctx: CardRenderCtx, cb: CardCallbacks): HTMLElement {
 	const cardEl = ctx.doc.createElement('div');
 	cardEl.className = CSS_CLASSES.CARD;
 	const filePath = entry.file.path;
@@ -152,6 +153,20 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		if (e.button !== 1) return;
 		if (e.target instanceof Element && e.target.closest('a')) return;
 		e.preventDefault();
+	});
+
+	cardEl.addEventListener('contextmenu', (e) => {
+		if (!ctx.groupByPropertyId || columnValue === ARCHIVED_LABEL) return;
+		e.preventDefault();
+		const menu = new Menu();
+		menu.addItem((item) => {
+			item.setTitle('Archive');
+			item.setIcon('archive');
+			item.onClick(() => {
+				cb.onArchiveCard(entry.file, columnValue);
+			});
+		});
+		menu.showAtMouseEvent(e);
 	});
 
 	return cardEl;
