@@ -96,8 +96,17 @@ If your notes have a frontmatter property pointing at a cover image (e.g., `cove
 - Select that property in the "Image property" dropdown
 - Each card gets a cover image above the title
 - Use "Image fit" to choose between Cover (crop to fill) and Contain (letterbox)
-- Drag the "Image aspect ratio" slider to size the cover — wide banner on the left, tall portrait on the right
+- Drag the "Image aspect ratio" slider to size the cover, wide banner on the left, tall portrait on the right
 - The same property value also works in Obsidian's built-in Cards view, so the two views stay in sync
+
+## Settings
+
+The plugin provides global text preview settings in **Settings → Community plugins → Kanban Bases View**:
+
+- **Enable text preview**: Toggle whether cards display a text preview of the note's content (disabled by default)
+- **Preview length**: Set the default character count for text previews when enabled
+
+When text preview is enabled globally, individual bases can override the default preview length by setting `bodyPreviewLength` in their view configuration. When text preview is disabled globally, it acts as a kill switch and no previews are shown regardless of per-base settings.
 
 ## Development
 
