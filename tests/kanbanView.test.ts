@@ -6,6 +6,7 @@ import type { BasesPropertyId } from 'obsidian';
 import {
 	ARCHIVED_LABEL,
 	CSS_CLASSES,
+	DEBOUNCE_DELAY,
 	HOVER_LINK_SOURCE_ID,
 	SORTABLE_CONFIG,
 	SORTABLE_GROUP,
@@ -13,6 +14,7 @@ import {
 	UNCATEGORIZED_LABEL,
 } from '../src/constants.ts';
 import { isCardOrders, KanbanView } from '../src/kanbanView.ts';
+import { DEFAULT_SETTINGS, type KanbanPluginSettings } from '../src/settings.ts';
 import { createCard } from '../src/components/card.ts';
 import { normalizePropertyValue } from '../src/utils/grouping.ts';
 import {
@@ -58,6 +60,10 @@ import {
 setupTestEnvironment();
 
 const noticeMessages = (): unknown[] => (Notice as unknown as { notices: unknown[] }).notices;
+const waitForBodyPreviewRender = async (): Promise<void> => {
+	await Promise.resolve();
+	await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_DELAY + 10));
+};
 
 describe('KanbanView Initialization', () => {
 	let scrollEl: HTMLElement;
@@ -834,6 +840,67 @@ describe('Data Rendering - Card Rendering', () => {
 			false,
 			'Property element should NOT have wrap class when disabled',
 		);
+	});
+
+	test('Card body preview shows the first 20 body characters by default', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		app = createMockApp({}, { [file.path]: '---\ntitle: Ignored\n---\nabcdefghijklmnopqrstuvw' });
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'abcdefghijklmnopqrst');
+	});
+
+	test('Card body preview length follows the configured value', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+		controller.config.set('bodyPreviewLength', 5);
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'abcde');
+	});
+
+	test('Card body preview is hidden when the configured length is zero', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+		controller.config.set('bodyPreviewLength', 0);
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
 	});
 
 	test('Card click handler opens file in workspace', () => {
@@ -2376,7 +2443,6 @@ describe('Column Colors', () => {
 		);
 	});
 });
-
 describe('Hidden columns', () => {
 	let scrollEl: HTMLElement;
 	let controller: any;
@@ -2406,6 +2472,18 @@ describe('Hidden columns', () => {
 		);
 	}
 
+	function getFlatBoardChildOrder(view: KanbanView): string[] {
+		const board = view.containerEl.querySelector(`.${CSS_CLASSES.BOARD}`) as HTMLElement;
+		return Array.from(board.children)
+			.map((child) => {
+				if (!child.instanceOf(HTMLElement)) return null;
+				if (child.classList.contains(CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR)) return 'indicator';
+				if (child.classList.contains(CSS_CLASSES.COLUMN)) return child.getAttribute('data-column-value');
+				return null;
+			})
+			.filter((value): value is string => value !== null);
+	}
+
 	function hideColumnViaMenu(view: KanbanView, columnValue: string, columnEl: HTMLElement): void {
 		(view as any).openColumnMenu(new MouseEvent('click'), columnValue, columnEl);
 		const hideItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Hide column');
@@ -2414,7 +2492,7 @@ describe('Hidden columns', () => {
 
 	function showColumnViaMenu(view: KanbanView, columnValue: string): void {
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${columnValue}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${columnValue}`);
 		showItem?.onClick?.();
 	}
 
@@ -2438,8 +2516,8 @@ describe('Hidden columns', () => {
 		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Done'], 'Only visible columns should render');
 		assert.deepStrictEqual(
 			(view as any)._prefs.columnOrder,
-			['To Do', 'Doing', 'Done'],
-			'columnOrder should still include the hidden column',
+			['To Do', 'Doing', 'Done', ARCHIVED_LABEL],
+			'columnOrder should still include the hidden column and the default Archived column',
 		);
 	});
 
@@ -2474,7 +2552,7 @@ describe('Hidden columns', () => {
 
 		const savedHidden = controller.config.get('hiddenColumns') as Record<string, string[]> | null;
 		assert.ok(savedHidden, 'hiddenColumns should be saved to config');
-		assert.deepStrictEqual(savedHidden?.[PROPERTY_STATUS], ['Doing']);
+		assert.deepStrictEqual(savedHidden?.[PROPERTY_STATUS], [ARCHIVED_LABEL, 'Doing']);
 
 		const scrollEl2 = createDivWithMethods();
 		const view2 = new KanbanView(controller, scrollEl2);
@@ -2483,18 +2561,20 @@ describe('Hidden columns', () => {
 
 		assert.ok((view2 as any)._prefs.hiddenColumns instanceof Set, 'hiddenColumns should load as a Set');
 		assert.ok((view2 as any)._prefs.hiddenColumns.has('Doing'), 'Reloaded prefs should include hidden column');
-		assert.strictEqual((view2 as any)._prefs.hiddenColumns.size, 1);
+		assert.ok(
+			(view2 as any)._prefs.hiddenColumns.has(ARCHIVED_LABEL),
+			'Reloaded prefs should include default hidden Archived column',
+		);
+		assert.strictEqual((view2 as any)._prefs.hiddenColumns.size, 2);
 	});
 
-	test('hidden columns indicator appears only when columns are hidden', () => {
+	test('hidden columns indicator reflects the default archived column and manually hidden columns', () => {
 		const view = setupStatusView();
 		triggerDataUpdate(view);
 
-		assert.strictEqual(
-			view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`),
-			null,
-			'Indicator should be absent when no columns are hidden',
-		);
+		const initialIndicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`);
+		assert.ok(initialIndicator, 'Indicator should appear for the default hidden Archived column');
+		assert.strictEqual(initialIndicator?.textContent, '1 hidden');
 
 		const doingColumn = view.containerEl.querySelector(
 			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
@@ -2503,7 +2583,70 @@ describe('Hidden columns', () => {
 
 		const indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`);
 		assert.ok(indicator, 'Indicator should appear when a column is hidden');
-		assert.strictEqual(indicator?.textContent, '1 hidden');
+		assert.strictEqual(indicator?.textContent, '2 hidden');
+	});
+
+	test('clicking the hidden columns indicator toggles hidden columns to the right of the button', () => {
+		const view = setupStatusView(createEntriesWithStatus(), {
+			columnOrder: ['To Do', 'Doing', 'Done'],
+		});
+		triggerDataUpdate(view);
+
+		const doingColumn = view.containerEl.querySelector(
+			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
+		) as HTMLElement;
+		hideColumnViaMenu(view, 'Doing', doingColumn);
+
+		MockMenu.lastInstance = null;
+		let indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`) as HTMLElement;
+		indicator.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+		assert.strictEqual(MockMenu.lastInstance, null, 'Clicking the indicator should not open a menu with column names');
+		assert.deepStrictEqual(
+			getFlatBoardChildOrder(view),
+			['To Do', 'Done', ARCHIVED_LABEL, 'indicator', 'Doing'],
+			'Hidden columns should appear to the right of the indicator button',
+		);
+		assert.ok((view as any)._prefs.hiddenColumns.has('Doing'), 'Click toggle should not permanently unhide Doing');
+
+		indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`) as HTMLElement;
+		indicator.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		assert.deepStrictEqual(getFlatBoardChildOrder(view), ['To Do', 'Done', 'indicator'], 'Second click should hide them');
+	});
+
+	test('context menu temporarily shows hidden columns after the Archived column', () => {
+		const view = setupStatusView(createEntriesWithStatus(), {
+			columnOrder: ['To Do', 'Doing', 'Done'],
+		});
+		triggerDataUpdate(view);
+
+		const doingColumn = view.containerEl.querySelector(
+			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
+		) as HTMLElement;
+		hideColumnViaMenu(view, 'Doing', doingColumn);
+
+		(view as any).openHiddenColumnsMenu(new MouseEvent('contextmenu'));
+		const temporaryShowItem = MockMenu.lastInstance?.items.find(
+			(item) => item.title === 'Show hidden columns temporarily',
+		);
+		temporaryShowItem?.onClick?.();
+
+		assert.deepStrictEqual(
+			getFlatBoardChildOrder(view),
+			['To Do', 'Done', ARCHIVED_LABEL, 'indicator', 'Doing'],
+			'Temporarily shown hidden columns should render after Archived and to the right of the indicator',
+		);
+		assert.ok((view as any)._prefs.hiddenColumns.has('Doing'), 'Temporary show should not permanently unhide Doing');
+		assert.ok(
+			(view as any)._prefs.hiddenColumns.has(ARCHIVED_LABEL),
+			'Temporary show should not permanently unhide Archived',
+		);
+
+		(view as any).openHiddenColumnsMenu(new MouseEvent('contextmenu'));
+		const temporaryHideItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Hide hidden columns');
+		temporaryHideItem?.onClick?.();
+
+		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Done'], 'Temporary hide should hide them again');
 	});
 });
 
@@ -2538,8 +2681,8 @@ describe('Legacy Data Migration', () => {
 		const saved = controller.config.get('columnOrders') as Record<string, string[]> | null;
 		assert.deepStrictEqual(
 			saved?.[PROPERTY_STATUS],
-			['Done', 'Doing', 'To Do'],
-			'Legacy order should be saved to config',
+			['Done', 'Doing', 'To Do', ARCHIVED_LABEL],
+			'Legacy order should be saved to config with the default Archived column appended',
 		);
 	});
 
@@ -3397,7 +3540,16 @@ describe('Empty Column Persistence - Eager order save', () => {
 		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]> | null;
 		const savedOrder = savedOrders?.[PROPERTY_STATUS];
 		assert.ok(savedOrder, 'Column order should be saved after first render');
-		assert.strictEqual(savedOrder.length, 3, 'All three live columns should be persisted');
+		assert.strictEqual(
+			savedOrder.length,
+			4,
+			'All three live columns plus the default Archived column should be persisted',
+		);
+		assert.strictEqual(
+			savedOrder[savedOrder.length - 1],
+			ARCHIVED_LABEL,
+			'Archived should be persisted as the last column',
+		);
 	});
 
 	test('Column that loses all entries remains in persisted order', () => {
@@ -4703,13 +4855,13 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		assert.ok(indicator, 'Indicator should appear');
 		assert.strictEqual(indicator?.textContent, '1 hidden', 'Indicator should count Archived');
 
-		// Verify menu offers Show: Archived
+		// Verify menu offers permanent unhide for Archived
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
-		assert.ok(showItem, 'Menu should offer Show: Archived');
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
+		assert.ok(showItem, 'Menu should offer Unhide: Archived');
 	});
 
-	test('VAL-ARCHCOL-008: Revealing Archived from the indicator renders it pinned last', () => {
+	test('VAL-ARCHCOL-008: Unhiding Archived from the context menu renders it pinned last', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
@@ -4718,15 +4870,15 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		triggerDataUpdate(view);
 
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
 		showItem?.onClick?.();
 
 		const values = getRenderedColumnValues(view);
-		assert.ok(values.includes(ARCHIVED_LABEL), 'Archived should be rendered after reveal');
-		assert.strictEqual(values[values.length - 1], ARCHIVED_LABEL, 'Archived should be last after reveal');
+		assert.ok(values.includes(ARCHIVED_LABEL), 'Archived should be rendered after unhide');
+		assert.strictEqual(values[values.length - 1], ARCHIVED_LABEL, 'Archived should be last after unhide');
 	});
 
-	test('VAL-ARCHCOL-009: Once revealed, Archived stays revealed across re-render', () => {
+	test('VAL-ARCHCOL-009: Once unhidden, Archived stays revealed across re-render', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
@@ -4734,9 +4886,9 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		const view = setupStatusView(entries);
 		triggerDataUpdate(view);
 
-		// Reveal Archived
+		// Unhide Archived
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
 		showItem?.onClick?.();
 
 		// Trigger more data updates
@@ -4761,9 +4913,9 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		const view = setupStatusView(entries);
 		triggerDataUpdate(view);
 
-		// Reveal Archived first
+		// Unhide Archived first
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
 		showItem?.onClick?.();
 		assert.ok(
 			view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`),
@@ -4820,13 +4972,13 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		assert.ok(indicator, 'Indicator should appear');
 		assert.strictEqual(indicator?.textContent, '1 hidden');
 
-		// Reveal
+		// Unhide
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
 		showItem?.onClick?.();
 
 		const values = getRenderedColumnValues(view);
-		assert.deepStrictEqual(values, [ARCHIVED_LABEL], 'Revealed Archived should be the only column');
+		assert.deepStrictEqual(values, [ARCHIVED_LABEL], 'Unhidden Archived should be the only column');
 	});
 });
 
@@ -5092,10 +5244,10 @@ describe('Archived Column Behavior - Cross Flows', () => {
 		assert.ok((view as any)._prefs.hiddenColumns.has(ARCHIVED_LABEL));
 	});
 
-	test('VAL-CROSS-002: Revealing the hidden Archived column shows it last with the archived card', () => {
+	test('VAL-CROSS-002: Unhiding the hidden Archived column shows it last with the archived card', () => {
 		const file = createMockTFile('Task 1.md');
 		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
-		const view = setupStatusView(entries, { columnOrder: ['To Do'] });
+		const view = setupStatusView(entries, { columnOrder: ['To Do', ARCHIVED_LABEL] });
 		triggerDataUpdate(view);
 
 		// Archive
@@ -5107,9 +5259,9 @@ describe('Archived Column Behavior - Cross Flows', () => {
 		controller.data.data = [createMockBasesEntry(file, { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
 		triggerDataUpdate(view);
 
-		// Reveal Archived
+		// Unhide Archived
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
 		showItem?.onClick?.();
 
 		const values = getRenderedColumnValues(view);
@@ -5267,14 +5419,14 @@ describe('Archived Column Behavior - Cross Flows', () => {
 		assert.ok(indicator);
 		assert.strictEqual(indicator?.textContent, '2 hidden', 'Indicator should count both hidden sources');
 
-		// Verify menu has both
+		// Verify menu has both permanent unhide actions
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showDone = MockMenu.lastInstance?.items.find((item) => item.title === 'Show: Done');
-		const showArchived = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
-		assert.ok(showDone, 'Menu should have Show: Done');
-		assert.ok(showArchived, 'Menu should have Show: Archived');
+		const showDone = MockMenu.lastInstance?.items.find((item) => item.title === 'Unhide: Done');
+		const showArchived = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
+		assert.ok(showDone, 'Menu should have Unhide: Done');
+		assert.ok(showArchived, 'Menu should have Unhide: Archived');
 
-		// Reveal only Archived
+		// Unhide only Archived
 		showArchived?.onClick?.();
 		const indicatorAfter = view.containerEl.querySelector('.obk-hidden-columns-indicator');
 		assert.ok(indicatorAfter);
@@ -5459,8 +5611,8 @@ describe('Move Column To End', () => {
 		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]> | null;
 		assert.deepStrictEqual(
 			savedOrders?.[PROPERTY_STATUS],
-			['Doing', 'Done', 'To Do'],
-			'New order should be persisted under the property id key',
+			['Doing', 'Done', 'To Do', ARCHIVED_LABEL],
+			'New order should be persisted under the property id key with Archived pinned last',
 		);
 	});
 
@@ -5492,6 +5644,26 @@ describe('Move Column To End', () => {
 
 		const moveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Move to end');
 		assert.strictEqual(moveItem, undefined, 'Move to end should not appear for Archived column');
+	});
+
+	test('VAL-MOVECOL-014: Archived column does not render an active drag handle', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
+			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
+		];
+		const view = setupStatusView(entries, { columnOrder: ['To Do', ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
+		assert.strictEqual(
+			archivedColumn.querySelector(`.${CSS_CLASSES.COLUMN_DRAG_HANDLE}`),
+			null,
+			'Archived should not expose the Sortable column drag handle',
+		);
+		assert.ok(
+			archivedColumn.querySelector(`.${CSS_CLASSES.COLUMN_DRAG_HANDLE_DISABLED}`),
+			'Archived should render a disabled drag marker for layout consistency',
+		);
 	});
 
 	test('VAL-MOVECOL-009: Edge - single non-Archived column with Archived is a no-op', () => {
@@ -5602,7 +5774,7 @@ describe('Move Column To End', () => {
 		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]> | null;
 		assert.deepStrictEqual(
 			savedOrders?.[PROPERTY_STATUS],
-			['Doing', 'To Do'],
+			['Doing', 'To Do', ARCHIVED_LABEL],
 			'In swimlane mode the bare property id is still used for columnOrders (shared board-wide)',
 		);
 	});
@@ -5631,7 +5803,7 @@ describe('Move Column To End', () => {
 		);
 	});
 
-	test('VAL-CROSS-006: Move to end while Archived is hidden still keeps Archived last on reveal', () => {
+	test('VAL-CROSS-006: Move to end while Archived is hidden still keeps Archived last on unhide', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Doing' }),
@@ -5648,16 +5820,289 @@ describe('Move Column To End', () => {
 		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
 		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
 
-		// Reveal Archived
+		// Unhide Archived
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Show: ${ARCHIVED_LABEL}`);
+		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
 		showItem?.onClick?.();
 
 		const values = getRenderedColumnValues(view);
 		assert.deepStrictEqual(
 			values,
 			['Doing', 'To Do', ARCHIVED_LABEL],
-			'After revealing Archived, it should still be absolute-last',
+			'After unhiding Archived, it should still be absolute-last',
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// VAL-PREVIEW-001 through VAL-PREVIEW-009: Global preview settings integration
+// ---------------------------------------------------------------------------
+
+describe('Global Preview Settings Integration', () => {
+	let scrollEl: HTMLElement;
+
+	beforeEach(() => {
+		scrollEl = createDivWithMethods();
+	});
+
+	function setupPreviewView(
+		entries: any[],
+		pluginSettings: KanbanPluginSettings,
+		markdownContents: Record<string, string> = {},
+		bodyPreviewLength: number | null = null,
+	): { view: KanbanView; controller: any; app: any } {
+		const app = createMockApp({}, markdownContents);
+		const controller = createMockQueryController(entries, TEST_PROPERTIES) as any;
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+		if (bodyPreviewLength !== null) {
+			controller.config.set('bodyPreviewLength', bodyPreviewLength);
+		}
+		const view = new KanbanView(controller, scrollEl, null, pluginSettings);
+		setupKanbanViewWithApp(view, app);
+		return { view, controller, app };
+	}
+
+	test('VAL-PREVIEW-001: global preview length is the default when per-base bodyPreviewLength is unset', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 10 };
+		const { view, app } = setupPreviewView(entries, pluginSettings, {
+			[file.path]: 'abcdefghijklmnopqrstuvwxyz',
+		});
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'abcdefghij');
+	});
+
+	test('VAL-PREVIEW-002: global disable hides previews everywhere', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: false, defaultTextPreviewLength: 20 };
+		const { view } = setupPreviewView(entries, pluginSettings, {
+			[file.path]: 'abcdefghijklmnopqrstuvwxyz',
+		});
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+
+	test('VAL-PREVIEW-003: global disable prevents preview file reads', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: false, defaultTextPreviewLength: 20 };
+		const { view, app } = setupPreviewView(entries, pluginSettings, {
+			[file.path]: 'abcdefghijklmnopqrstuvwxyz',
+		});
+
+		const readCalls: string[] = [];
+		const originalRead = app.vault.read;
+		app.vault.read = async (f: any) => {
+			readCalls.push(f.path);
+			return originalRead(f);
+		};
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(readCalls.length, 0, 'vault.read should not be called when global previews are disabled');
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+
+	test('VAL-PREVIEW-004: per-base length overrides global default when enabled', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 20 };
+		const { view } = setupPreviewView(entries, pluginSettings, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' }, 5);
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'abcde');
+	});
+
+	test('VAL-PREVIEW-005: per-base zero disables that base when globally enabled', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 20 };
+		const { view } = setupPreviewView(entries, pluginSettings, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' }, 0);
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+
+	test('VAL-PREVIEW-006: per-base override cannot bypass global disable', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: false, defaultTextPreviewLength: 20 };
+		const { view } = setupPreviewView(entries, pluginSettings, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' }, 5);
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+
+	test('VAL-PREVIEW-008: global default zero disables previews when no per-base value exists', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 0 };
+		const { view } = setupPreviewView(entries, pluginSettings, {
+			[file.path]: 'abcdefghijklmnopqrstuvwxyz',
+		});
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+
+	test('VAL-PREVIEW-009: malformed per-base preview length falls back to global default safely', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 15 };
+		const { view, controller } = setupPreviewView(entries, pluginSettings, {
+			[file.path]: 'abcdefghijklmnopqrstuvwxyz',
+		});
+		// Manually inject a malformed value by bypassing config.set type safety
+		(controller.config as any).get = (key: string) => {
+			if (key === 'bodyPreviewLength') return 'not-a-number';
+			return null;
+		};
+
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'abcdefghijklmno');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// VAL-CROSS-001: Persisted settings affect newly created views
+// ---------------------------------------------------------------------------
+
+describe('VAL-CROSS-001: Persisted settings affect newly created views', () => {
+	test('newly created view uses the passed plugin settings for preview length', async () => {
+		const scrollEl = createDivWithMethods();
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 8 };
+		const app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+		const controller = createMockQueryController(entries, TEST_PROPERTIES) as any;
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+
+		const view = new KanbanView(controller, scrollEl, null, pluginSettings);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'abcdefgh');
+	});
+
+	test('newly created view with disabled previews hides them', async () => {
+		const scrollEl = createDivWithMethods();
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: false, defaultTextPreviewLength: 20 };
+		const app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+		const controller = createMockQueryController(entries, TEST_PROPERTIES) as any;
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+
+		const view = new KanbanView(controller, scrollEl, null, pluginSettings);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// VAL-CROSS-002: Settings changes affect open views
+// ---------------------------------------------------------------------------
+
+describe('VAL-CROSS-002: Settings changes affect open views', () => {
+	test('open view picks up changed global disable on next data update', async () => {
+		const scrollEl = createDivWithMethods();
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 20 };
+		const app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+		const controller = createMockQueryController(entries, TEST_PROPERTIES) as any;
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+
+		const view = new KanbanView(controller, scrollEl, null, pluginSettings);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		// Initially previews are visible
+		assert.ok(view.containerEl.querySelector('.obk-card-preview'), 'Preview should be visible initially');
+
+		// Mutate the shared settings object (mirrors what the settings tab does)
+		pluginSettings.textPreviewEnabled = false;
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-card-preview'),
+			null,
+			'Preview should be hidden after global disable',
+		);
+	});
+
+	test('open view picks up changed default preview length on next data update', async () => {
+		const scrollEl = createDivWithMethods();
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 5 };
+		const app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+		const controller = createMockQueryController(entries, TEST_PROPERTIES) as any;
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+
+		const view = new KanbanView(controller, scrollEl, null, pluginSettings);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const previewBefore = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(previewBefore?.textContent, 'abcde');
+
+		// Mutate the shared settings object
+		pluginSettings.defaultTextPreviewLength = 8;
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const previewAfter = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(previewAfter?.textContent, 'abcdefgh');
 	});
 });
