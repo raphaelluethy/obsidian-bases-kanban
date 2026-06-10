@@ -1,6 +1,7 @@
 import { Plugin } from 'obsidian';
 import { HOVER_LINK_SOURCE_ID } from './constants.ts';
 import { KanbanView, type LegacyData, isRecord, isColumnOrders, isColumnColors } from './kanbanView.ts';
+import { type KanbanPluginSettings, DEFAULT_SETTINGS, normalizeSettings, KanbanSettingTab } from './settings.ts';
 
 export const KANBAN_VIEW_TYPE = 'kanban-view';
 
@@ -39,11 +40,14 @@ function parseLegacyData(data: unknown): LegacyData | null {
 }
 
 export default class KanbanBasesViewPlugin extends Plugin {
+	settings: KanbanPluginSettings = { ...DEFAULT_SETTINGS };
+
 	async onload() {
 		// Read any data previously saved to plugin.data.json and pass it to each
 		// view instance so it can lazily migrate state into the base config on
 		// first render. Once migrated, plugin.data.json is no longer consulted.
 		const raw: unknown = await this.loadData();
+		this.settings = normalizeSettings(raw);
 		const legacyData = parseLegacyData(raw);
 
 		this.registerHoverLinkSource(HOVER_LINK_SOURCE_ID, {
@@ -55,10 +59,12 @@ export default class KanbanBasesViewPlugin extends Plugin {
 			name: 'Kanban',
 			icon: 'columns',
 			factory: (controller, scrollEl) => {
-				return new KanbanView(controller, scrollEl, legacyData);
+				return new KanbanView(controller, scrollEl, legacyData, this.settings);
 			},
 			options: KanbanView.getViewOptions,
 		});
+
+		this.addSettingTab(new KanbanSettingTab(this.app, this));
 	}
 
 	onunload() {

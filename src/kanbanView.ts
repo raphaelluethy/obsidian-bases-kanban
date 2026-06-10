@@ -42,6 +42,7 @@ import {
 import type { DebouncedFn } from './utils/debounce.ts';
 import { debounce } from './utils/debounce.ts';
 import { ensureGroupExists, normalizePropertyValue } from './utils/grouping.ts';
+import { type KanbanPluginSettings, DEFAULT_SETTINGS } from './settings.ts';
 
 export interface LegacyData {
 	columnOrders: Record<string, string[]>;
@@ -120,8 +121,14 @@ export class KanbanView extends BasesView {
 	private _lastImageAspectRatio: number | undefined = undefined;
 	private _lastSwimlanePropertyId: BasesPropertyId | null | undefined = undefined;
 	private _lastQuickAddFolder: string | null | undefined = undefined;
+	private _lastBodyPreviewLength: number | undefined = undefined;
 	private _cardFingerprints: Map<string, string> = new Map();
+	private _bodyPreviewCache: Map<string, { mtime: number; text: string }> = new Map();
+	private _pendingBodyPreviewLoads: Set<string> = new Set();
 	private _deferredSortableListeners: Map<string, { el: HTMLElement; handler: () => void }> = new Map();
+	private _temporarilyShowHiddenColumns = false;
+	private bodyPreviewLength = 20;
+	private pluginSettings: KanbanPluginSettings;
 
 	private _prefs: {
 		columnOrder: string[];
@@ -149,11 +156,17 @@ export class KanbanView extends BasesView {
 	private _dragging = false;
 	private _activeCardPath: string | null = null;
 
-	constructor(controller: QueryController, scrollEl: HTMLElement, legacyData: LegacyData | null = null) {
+	constructor(
+		controller: QueryController,
+		scrollEl: HTMLElement,
+		legacyData: LegacyData | null = null,
+		pluginSettings: KanbanPluginSettings | null = null,
+	) {
 		super(controller);
 		this.scrollEl = scrollEl;
 		this.containerEl = scrollEl.createDiv({ cls: CSS_CLASSES.VIEW_CONTAINER });
 		this.legacyData = legacyData;
+		this.pluginSettings = pluginSettings ?? { ...DEFAULT_SETTINGS };
 
 		// Delegated handler for internal links rendered inside property values.
 		// Obsidian's global click handler only covers MarkdownView/TextFileView
@@ -209,6 +222,29 @@ export class KanbanView extends BasesView {
 		this.swimlaneByPropertyId = this.config.getAsPropertyId('swimlaneByProperty');
 		this.cardTitlePropertyId = this.config.getAsPropertyId('cardTitleProperty');
 		this.imagePropertyId = this.config.getAsPropertyId('imageProperty');
+		this.bodyPreviewLength = this.computeEffectivePreviewLength();
+	}
+
+	private computeEffectivePreviewLength(): number {
+		// Global kill switch: when globally disabled, effective length is always 0.
+		if (!this.pluginSettings.textPreviewEnabled) {
+			return 0;
+		}
+
+		const rawBodyPreviewLength = this.config?.get('bodyPreviewLength');
+
+		// Per-base value is unset: fall back to global default.
+		if (rawBodyPreviewLength === null || rawBodyPreviewLength === undefined) {
+			return this.pluginSettings.defaultTextPreviewLength;
+		}
+
+		// Per-base value is set: validate and fall back to global default if malformed.
+		const parsedBodyPreviewLength = Number(rawBodyPreviewLength);
+		if (Number.isFinite(parsedBodyPreviewLength) && parsedBodyPreviewLength >= 0) {
+			return parsedBodyPreviewLength;
+		}
+
+		return this.pluginSettings.defaultTextPreviewLength;
 	}
 
 	private triggerHoverPreview(linktext: string, sourcePath: string, event: MouseEvent, targetEl: HTMLElement): void {
@@ -398,6 +434,7 @@ export class KanbanView extends BasesView {
 
 			// Build path→entry lookup map for O(1) access in handleCardDrop
 			this._entryMap = new Map(entries.map((e: BasesEntry) => [e.file.path, e]));
+			this.queueBodyPreviewLoads(entries);
 
 			// Group entries — 2D when swimlanes are active, 1D otherwise. The
 			// column-axis preference logic (order, colors, new-value detection)
@@ -441,6 +478,7 @@ export class KanbanView extends BasesView {
 				this._prefs.columnOrder = this._prefs.columnOrder.filter((value) => value !== UNCATEGORIZED_LABEL);
 				shouldPersistColumnOrder = true;
 			}
+			const hadArchivedColumn = this._prefs.columnOrder.includes(ARCHIVED_LABEL);
 			const newValues = liveValues.filter((v) => !this._prefs.columnOrder.includes(v));
 			if (newValues.length > 0) {
 				const isInitialOrder = this._prefs.columnOrder.length === 0;
@@ -448,8 +486,10 @@ export class KanbanView extends BasesView {
 				this._prefs.columnOrder = isInitialOrder ? [...newValues].sort() : [...this._prefs.columnOrder, ...newValues];
 				shouldPersistColumnOrder = true;
 			}
-			// Auto-hide Archived on first appearance (not yet in columnOrder)
-			if (newValues.includes(ARCHIVED_LABEL)) {
+			// Ensure every board has the built-in Archived column. It is hidden when
+			// first created, then remains user-controlled via hiddenColumns.
+			if (!hadArchivedColumn) {
+				this._prefs.columnOrder = [...this._prefs.columnOrder.filter((value) => value !== ARCHIVED_LABEL), ARCHIVED_LABEL];
 				this._prefs.hiddenColumns.add(ARCHIVED_LABEL);
 				shouldPersistColumnOrder = true;
 			}
@@ -458,7 +498,7 @@ export class KanbanView extends BasesView {
 			}
 
 			const orderedValues = this.getOrderedColumnValues(liveValues);
-			const visibleValues = orderedValues.filter((v) => !this._prefs.hiddenColumns.has(v));
+			const visibleValues = this.getVisibleColumnValues(orderedValues);
 
 			const currentOrderKey = JSON.stringify(this.config?.getOrder() ?? []);
 			const orderChanged = currentOrderKey !== this._lastOrderKey;
@@ -493,6 +533,10 @@ export class KanbanView extends BasesView {
 			const quickAddFolderChanged = currentQuickAddFolder !== this._lastQuickAddFolder;
 			this._lastQuickAddFolder = currentQuickAddFolder;
 
+			const currentBodyPreviewLength = this.bodyPreviewLength;
+			const bodyPreviewLengthChanged = currentBodyPreviewLength !== this._lastBodyPreviewLength;
+			this._lastBodyPreviewLength = currentBodyPreviewLength;
+
 			const existingBoard = this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.BOARD}`);
 			const optionsChanged =
 				orderChanged ||
@@ -502,7 +546,8 @@ export class KanbanView extends BasesView {
 				imageFitChanged ||
 				imageAspectRatioChanged ||
 				swimlanePropertyChanged ||
-				quickAddFolderChanged;
+				quickAddFolderChanged ||
+				bodyPreviewLengthChanged;
 
 			const lanes = new Map<string | null, Map<string, BasesEntry[]>>();
 			if (groupedByLane) {
@@ -1043,6 +1088,8 @@ export class KanbanView extends BasesView {
 			wrapValues: this._lastWrapValue ?? false,
 			order: this.config?.getOrder() ?? [],
 			getDisplayName: (id) => this.config?.getDisplayName(id) ?? id,
+			bodyPreviewLength: this.bodyPreviewLength,
+			bodyPreviews: this.getBodyPreviews(),
 		};
 	}
 
@@ -1071,12 +1118,18 @@ export class KanbanView extends BasesView {
 
 	private openColumnMenu(evt: MouseEvent, value: string, _columnEl: HTMLElement): void {
 		const menu = new Menu();
+		const isHidden = this._prefs.hiddenColumns.has(value);
 
 		menu.addItem((item) => {
-			item.setTitle('Hide column');
-			item.setIcon('eye-off');
+			item.setTitle(isHidden ? 'Unhide column' : 'Hide column');
+			item.setIcon(isHidden ? 'eye' : 'eye-off');
 			item.onClick(() => {
-				this._prefs.hiddenColumns.add(value);
+				if (isHidden) {
+					this._prefs.hiddenColumns.delete(value);
+				} else {
+					this._prefs.hiddenColumns.add(value);
+				}
+				if (this._prefs.hiddenColumns.size === 0) this._temporarilyShowHiddenColumns = false;
 				this._persistPrefs();
 				this.render();
 			});
@@ -1117,18 +1170,29 @@ export class KanbanView extends BasesView {
 
 	private addHiddenColumnRestoreItems(menu: Menu): void {
 		if (this._prefs.hiddenColumns.size > 0) {
+			menu.addItem((item) => {
+				item.setTitle(this._temporarilyShowHiddenColumns ? 'Hide hidden columns' : 'Show hidden columns temporarily');
+				item.setIcon(this._temporarilyShowHiddenColumns ? 'eye-off' : 'eye');
+				item.onClick(() => {
+					this._temporarilyShowHiddenColumns = !this._temporarilyShowHiddenColumns;
+					this.render();
+				});
+			});
+			menu.addSeparator();
 			for (const hiddenValue of this._prefs.hiddenColumns) {
 				menu.addItem((item) => {
-					item.setTitle(`Show: ${hiddenValue}`);
+					item.setTitle(`Unhide: ${hiddenValue}`);
 					item.setIcon('eye');
 					item.onClick(() => {
 						this._prefs.hiddenColumns.delete(hiddenValue);
+						if (this._prefs.hiddenColumns.size === 0) this._temporarilyShowHiddenColumns = false;
 						this._persistPrefs();
 						this.render();
 					});
 				});
 			}
 		} else {
+			this._temporarilyShowHiddenColumns = false;
 			menu.addItem((item) => {
 				item.setTitle('No hidden columns');
 				item.setDisabled(true);
@@ -1146,11 +1210,91 @@ export class KanbanView extends BasesView {
 			text: `${this._prefs.hiddenColumns.size} hidden`,
 		});
 		indicator.setAttribute('role', 'button');
-		indicator.setAttribute('aria-label', 'Show hidden columns');
+		indicator.setAttribute('aria-label', 'Toggle hidden columns');
+		indicator.setAttribute('aria-pressed', String(this._temporarilyShowHiddenColumns));
+		indicator.setAttribute('title', 'Click to show or hide hidden columns. Right-click for options.');
 		indicator.addEventListener('click', (evt) => {
 			evt.stopPropagation();
-			if (evt.instanceOf(MouseEvent)) this.openHiddenColumnsMenu(evt);
+			this._temporarilyShowHiddenColumns = !this._temporarilyShowHiddenColumns;
+			this.render();
 		});
+		indicator.addEventListener('contextmenu', (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			this.openHiddenColumnsMenu(evt);
+		});
+
+		if (this._temporarilyShowHiddenColumns) {
+			const firstHiddenColumn = Array.from(boardEl.children).find((child): child is HTMLElement => {
+				if (!child.instanceOf(HTMLElement) || !child.classList.contains(CSS_CLASSES.COLUMN)) return false;
+				const value = child.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE);
+				return value !== null && value !== ARCHIVED_LABEL && this._prefs.hiddenColumns.has(value);
+			});
+			if (firstHiddenColumn) boardEl.insertBefore(indicator, firstHiddenColumn);
+		}
+	}
+
+	private getVisibleColumnValues(orderedValues: string[]): string[] {
+		if (this._prefs.hiddenColumns.size === 0) {
+			this._temporarilyShowHiddenColumns = false;
+			return orderedValues;
+		}
+		if (!this._temporarilyShowHiddenColumns) {
+			return orderedValues.filter((value) => !this._prefs.hiddenColumns.has(value));
+		}
+
+		const visibleColumns = orderedValues.filter(
+			(value) => !this._prefs.hiddenColumns.has(value) && value !== ARCHIVED_LABEL,
+		);
+		const archivedColumn = orderedValues.includes(ARCHIVED_LABEL) ? [ARCHIVED_LABEL] : [];
+		const hiddenColumns = orderedValues.filter(
+			(value) => this._prefs.hiddenColumns.has(value) && value !== ARCHIVED_LABEL,
+		);
+		return [...visibleColumns, ...archivedColumn, ...hiddenColumns];
+	}
+
+	private getBodyPreviews(): Map<string, string> {
+		if (this.bodyPreviewLength <= 0) return new Map();
+		const previews = new Map<string, string>();
+		for (const [path, cached] of this._bodyPreviewCache.entries()) {
+			const preview = Array.from(cached.text).slice(0, this.bodyPreviewLength).join('');
+			if (preview) previews.set(path, preview);
+		}
+		return previews;
+	}
+
+	private queueBodyPreviewLoads(entries: BasesEntry[]): void {
+		if (this.bodyPreviewLength <= 0) return;
+		const vault = this.app?.vault;
+		if (typeof vault?.read !== 'function') return;
+
+		for (const entry of entries) {
+			const { file } = entry;
+			const cached = this._bodyPreviewCache.get(file.path);
+			if (cached?.mtime === file.stat.mtime || this._pendingBodyPreviewLoads.has(file.path)) continue;
+
+			this._pendingBodyPreviewLoads.add(file.path);
+			void vault
+				.read(file)
+				.then((markdown) => {
+					const text = this.extractBodyPreviewText(markdown);
+					const current = this._bodyPreviewCache.get(file.path);
+					if (current?.mtime === file.stat.mtime && current.text === text) return;
+					this._bodyPreviewCache.set(file.path, { mtime: file.stat.mtime, text });
+					this._debouncedRender();
+				})
+				.catch((error) => {
+					console.error('KanbanView: error loading card body preview', error);
+				})
+				.finally(() => {
+					this._pendingBodyPreviewLoads.delete(file.path);
+				});
+		}
+	}
+
+	private extractBodyPreviewText(markdown: string): string {
+		const withoutFrontmatter = markdown.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n|$)/, '');
+		return withoutFrontmatter.replace(/\s+/g, ' ').trim();
 	}
 
 	private openColorPicker(anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string): void {
@@ -1616,6 +1760,15 @@ export class KanbanView extends BasesView {
 				displayName: 'Wrap property values',
 				type: 'toggle',
 				key: 'wrapPropertyValues',
+			},
+			{
+				displayName: 'Card body preview length',
+				type: 'slider',
+				key: 'bodyPreviewLength',
+				default: 20,
+				min: 0,
+				max: 200,
+				step: 1,
 			},
 		];
 	}

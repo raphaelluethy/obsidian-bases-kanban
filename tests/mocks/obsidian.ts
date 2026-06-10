@@ -60,6 +60,7 @@ export interface App {
 		getFolderByPath(path: string): { path: string; name: string } | null;
 		getAbstractFileByPath(path: string): TFile | null;
 		getResourcePath(file: { path: string }): string;
+		read(file: TFile): Promise<string>;
 	};
 	renderContext: RenderContext;
 }
@@ -107,9 +108,99 @@ export abstract class BasesView {
 	}
 }
 
+export abstract class PluginSettingTab {
+	app: App;
+	plugin: Plugin;
+	containerEl: HTMLElement;
+
+	constructor(app: App, plugin: Plugin) {
+		this.app = app;
+		this.plugin = plugin;
+		this.containerEl = document.createElement('div');
+	}
+
+	abstract display(): void;
+}
+
+export class ToggleComponent {
+	inputEl: HTMLInputElement;
+	private onChangeCb?: (value: boolean) => unknown;
+
+	constructor(containerEl: HTMLElement) {
+		this.inputEl = document.createElement('input');
+		this.inputEl.type = 'checkbox';
+		containerEl.appendChild(this.inputEl);
+	}
+
+	setValue(value: boolean): this {
+		this.inputEl.checked = value;
+		return this;
+	}
+
+	onChange(cb: (value: boolean) => unknown): this {
+		this.onChangeCb = cb;
+		this.inputEl.addEventListener('change', () => {
+			this.onChangeCb?.(this.inputEl.checked);
+		});
+		return this;
+	}
+}
+
+export class Setting {
+	settingEl: HTMLElement;
+	nameEl: HTMLElement;
+	descEl: HTMLElement;
+	controlEl: HTMLElement;
+
+	constructor(containerEl: HTMLElement) {
+		this.settingEl = document.createElement('div');
+		this.settingEl.className = 'setting-item';
+		containerEl.appendChild(this.settingEl);
+
+		const infoEl = document.createElement('div');
+		infoEl.className = 'setting-item-info';
+		this.settingEl.appendChild(infoEl);
+
+		this.nameEl = document.createElement('div');
+		this.nameEl.className = 'setting-item-name';
+		infoEl.appendChild(this.nameEl);
+
+		this.descEl = document.createElement('div');
+		this.descEl.className = 'setting-item-description';
+		infoEl.appendChild(this.descEl);
+
+		this.controlEl = document.createElement('div');
+		this.controlEl.className = 'setting-item-control';
+		this.settingEl.appendChild(this.controlEl);
+	}
+
+	setName(name: string): this {
+		this.nameEl.textContent = name;
+		return this;
+	}
+
+	setDesc(desc: string): this {
+		this.descEl.textContent = desc;
+		return this;
+	}
+
+	addToggle(cb: (toggle: ToggleComponent) => void): this {
+		const toggle = new ToggleComponent(this.controlEl);
+		cb(toggle);
+		return this;
+	}
+
+	addText(cb: (text: TextComponent) => void): this {
+		const text = new TextComponent(this.controlEl);
+		cb(text);
+		return this;
+	}
+}
+
 export class Plugin {
 	app: App;
 	manifest: any;
+	addSettingTabCalls: PluginSettingTab[] = [];
 
 	constructor(app: App, manifest: any) {
 		this.app = app;
@@ -125,6 +216,14 @@ export class Plugin {
 
 	registerHoverLinkSource?(id: string, info: any): void {
 		// Mock implementation
+	}
+
+	addSettingTab(tab: PluginSettingTab): void {
+		this.addSettingTabCalls.push(tab);
+	}
+
+	async saveData(_data: unknown): Promise<void> {
+		// Mock implementation — tests override this
 	}
 }
 
@@ -401,6 +500,7 @@ export class Modal {
 
 export class TextComponent {
 	inputEl: HTMLInputElement;
+	private onChangeCb?: (value: string) => unknown;
 
 	constructor(containerEl: HTMLElement) {
 		this.inputEl = document.createElement('input');
@@ -419,6 +519,14 @@ export class TextComponent {
 
 	setPlaceholder(placeholder: string): this {
 		this.inputEl.placeholder = placeholder;
+		return this;
+	}
+
+	onChange(cb: (value: string) => unknown): this {
+		this.onChangeCb = cb;
+		this.inputEl.addEventListener('change', () => {
+			this.onChangeCb?.(this.inputEl.value);
+		});
 		return this;
 	}
 }
