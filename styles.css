@@ -582,6 +582,35 @@
 	margin: 0;
 }
 
+/* Property values are rendered by Obsidian's value renderer, which emits
+   metadata-editor markup: date/datetime values are disabled <input> elements
+   with form-field chrome (background, border, input min-height), tags are
+   padded pills, and lists sit in a block-level container. Bases' own views
+   flatten this via .bases-rendered-value; do the same here so values read as
+   plain inline text and every property row keeps a stable height. */
+.obk-card-property-value input.metadata-input-text {
+	background: none;
+	border: none;
+	padding: 0;
+	min-height: 0;
+	width: auto;
+	font-size: inherit;
+	color: inherit;
+	pointer-events: none;
+}
+
+.obk-card-property-value a.tag {
+	background: none;
+	border: none;
+	padding: 0;
+	font-size: inherit;
+	line-height: inherit;
+}
+
+.obk-card-property-value .value-list-container {
+	display: inline;
+}
+
 .obk-quick-add-form {
 	display: flex;
 	flex-direction: column;
