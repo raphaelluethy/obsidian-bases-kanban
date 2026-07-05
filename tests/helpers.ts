@@ -262,7 +262,10 @@ export function createMockFn(): MockFn {
 }
 
 // Mock App
-export function createMockApp(imageFiles: Record<string, { path: string }> = {}): App & {
+export function createMockApp(
+	imageFiles: Record<string, { path: string }> = {},
+	markdownContents: Record<string, string> = {},
+): App & {
 	workspace: {
 		openLinkText: MockFn;
 		trigger: MockFn;
@@ -273,6 +276,14 @@ export function createMockApp(imageFiles: Record<string, { path: string }> = {})
 		mostRecentLeaf: unknown;
 	};
 	fileManager: { processFrontMatter: MockFn; renameFile: MockFn };
+	vault: {
+		copy: MockFn;
+		getMarkdownFiles: () => TFile[];
+		getFolderByPath: (path: string) => { path: string; name: string };
+		getAbstractFileByPath: (path: string) => TFile | null;
+		getResourcePath: (file: { path: string }) => string;
+		read: (file: TFile) => Promise<string>;
+	};
 } {
 	const openLinkText = createMockFn();
 	const trigger = createMockFn();
@@ -298,6 +309,16 @@ export function createMockApp(imageFiles: Record<string, { path: string }> = {})
 	const processFrontMatter = createMockFn();
 	const renameFile = createMockFn();
 	const markdownFiles: any[] = [];
+	const copyCalls: any[][] = [];
+	const copy = Object.assign(
+		(file: TFile, newPath: string) => {
+			copyCalls.push([file, newPath]);
+			const copiedFile = createMockTFile(newPath);
+			markdownFiles.push(copiedFile);
+			return Promise.resolve(copiedFile);
+		},
+		{ calls: copyCalls, reset: () => (copyCalls.length = 0) },
+	) as MockFn;
 
 	return {
 		workspace: {
@@ -322,6 +343,8 @@ export function createMockApp(imageFiles: Record<string, { path: string }> = {})
 			getFolderByPath: (path: string) => ({ path, name: path.split('/').pop() ?? path }),
 			getAbstractFileByPath: (path: string) => markdownFiles.find((file) => file.path === path) ?? null,
 			getResourcePath: (file: { path: string }) => `app://fake/${file.path}`,
+			copy,
+			read: (file: TFile) => Promise.resolve(markdownContents[file.path] ?? ''),
 		} as any,
 		renderContext: { hoverPopover: null } as any,
 	} as any;

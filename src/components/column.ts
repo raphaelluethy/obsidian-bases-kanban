@@ -1,5 +1,5 @@
 import type { BasesEntry } from 'obsidian';
-import { COLOR_PALETTE, CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
+import { ARCHIVED_LABEL, COLOR_PALETTE, CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
 import { createCard, computeCardFingerprint, type CardRenderCtx, type CardCallbacks } from './card.ts';
 
 export interface ColumnRenderCtx {
@@ -14,7 +14,7 @@ export interface ColumnRenderCtx {
 export interface ColumnCallbacks {
 	applyColumnColor: (columnEl: HTMLElement, colorName: string | null) => void;
 	onColorPickerClick: (anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string) => void;
-	onRemoveColumn: (columnValue: string, columnEl: HTMLElement) => void;
+	onColumnMenu: (evt: MouseEvent, columnValue: string, columnEl: HTMLElement) => void;
 	createAddButton: (columnValue: string, swimlaneValue: string | null) => HTMLElement;
 	getQuickAddFolder: () => string | null;
 }
@@ -35,62 +35,91 @@ export function applyColumnColor(columnEl: HTMLElement, colorName: string | null
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_COLOR, colorName);
 }
 
-export function createRemoveButton(doc: Document, value: string, onRemove: () => void): HTMLElement {
-	const btn = doc.createElement('div');
-	btn.className = CSS_CLASSES.COLUMN_REMOVE_BTN;
-	btn.setAttribute('aria-label', `Remove column: ${value}`);
-	btn.setAttribute('role', 'button');
-	btn.textContent = '×';
-	btn.addEventListener('click', (e) => {
+/** Wire a div so it behaves like a button for both mouse and keyboard users. */
+function makeAccessibleButton(el: HTMLElement, label: string, activate: (e: Event) => void): void {
+	el.setAttribute('role', 'button');
+	el.setAttribute('aria-label', label);
+	el.setAttribute('tabindex', '0');
+	el.addEventListener('click', (e) => {
 		e.stopPropagation();
-		onRemove();
+		activate(e);
 	});
-	return btn;
+	el.addEventListener('keydown', (e) => {
+		if (e.key !== 'Enter' && e.key !== ' ') return;
+		e.preventDefault();
+		e.stopPropagation();
+		activate(e);
+	});
 }
 
 export function createColumn(
 	value: string,
 	entries: BasesEntry[],
-	options: { showRemoveButton?: boolean; swimlaneValue?: string | null },
+	options: { swimlaneValue?: string | null },
 	ctx: ColumnRenderCtx,
 	cb: ColumnCallbacks,
 ): HTMLElement {
 	const columnEl = ctx.doc.createElement('div');
 	columnEl.className = CSS_CLASSES.COLUMN;
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_VALUE, value);
+	const isArchived = value === ARCHIVED_LABEL;
 
 	const colorName = ctx.prefs.columnColors[value] ?? null;
 	cb.applyColumnColor(columnEl, colorName);
 
 	const headerEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_HEADER });
 
-	const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
-	dragHandle.textContent = '⋮⋮';
-
-	const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
-	colorBtn.setAttribute('aria-label', `Set color for column: ${value}`);
-	colorBtn.setAttribute('role', 'button');
-	colorBtn.addEventListener('click', (e) => {
-		e.stopPropagation();
-		cb.onColorPickerClick(colorBtn, columnEl, value);
-	});
+	// Drag handle sits at the left, before the title. The Archived column is
+	// pinned last and not reorderable, so it gets no handle at all.
+	if (!isArchived) {
+		const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
+		dragHandle.textContent = '⋮⋮';
+		dragHandle.setAttribute('aria-label', `Drag to reorder column: ${value}`);
+	}
 
 	headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
 	headerEl.createSpan({ text: `${entries.length}`, cls: CSS_CLASSES.COLUMN_COUNT });
 
-	if (cb.getQuickAddFolder()) {
+	// Right-aligned control cluster: color, add, menu. Revealed on hover/focus.
+	const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
+	makeAccessibleButton(colorBtn, `Set color for column: ${value}`, () =>
+		cb.onColorPickerClick(colorBtn, columnEl, value),
+	);
+
+	if (!isArchived && cb.getQuickAddFolder()) {
 		headerEl.appendChild(cb.createAddButton(value, options.swimlaneValue ?? null));
 	}
 
-	if (entries.length === 0 && options.showRemoveButton !== false) {
-		headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
-	}
+	const menuBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_MENU_BTN });
+	menuBtn.textContent = '⋮';
+	menuBtn.setAttribute('role', 'button');
+	menuBtn.setAttribute('aria-label', 'Column options');
+	menuBtn.setAttribute('tabindex', '0');
+	menuBtn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		cb.onColumnMenu(e, value, columnEl);
+	});
+	menuBtn.addEventListener('keydown', (e) => {
+		if (e.key !== 'Enter' && e.key !== ' ') return;
+		e.preventDefault();
+		e.stopPropagation();
+		// Open the menu anchored to the button rather than at (0,0): synthesize a
+		// click carrying the button's coordinates so the menu appears beneath it.
+		const rect = menuBtn.getBoundingClientRect();
+		menuBtn.dispatchEvent(new MouseEvent('click', { clientX: rect.left, clientY: rect.bottom }));
+	});
+
+	headerEl.addEventListener('contextmenu', (e) => {
+		e.preventDefault();
+		e.stopPropagation();
+		cb.onColumnMenu(e, value, columnEl);
+	});
 
 	const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
 	bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
 
 	entries.forEach((entry) => {
-		bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
+		bodyEl.appendChild(createCard(entry, value, ctx.card, ctx.cardCb));
 	});
 
 	return columnEl;
@@ -110,21 +139,17 @@ export function patchColumnCards(
 
 	const headerEl = columnEl.querySelector<HTMLElement>(`.${CSS_CLASSES.COLUMN_HEADER}`);
 	const columnValue = columnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE);
-	const existingRemoveBtn = headerEl?.querySelector(`.${CSS_CLASSES.COLUMN_REMOVE_BTN}`) ?? null;
-	const isInSwimlane = !!columnEl.closest(`.${CSS_CLASSES.SWIMLANE}`);
-	if (headerEl && newEntries.length === 0 && !existingRemoveBtn && columnValue && !isInSwimlane) {
-		headerEl.appendChild(createRemoveButton(ctx.doc, columnValue, () => cb.onRemoveColumn(columnValue, columnEl)));
-	} else if (newEntries.length > 0 && existingRemoveBtn) {
-		existingRemoveBtn.remove();
-	}
 
 	const existingAddBtn = headerEl?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`) ?? null;
 	const hasFolder = !!cb.getQuickAddFolder();
-	if (headerEl && columnValue && hasFolder && !existingAddBtn) {
+	const allowAdd = hasFolder && columnValue !== null && columnValue !== ARCHIVED_LABEL;
+	if (headerEl && columnValue && allowAdd && !existingAddBtn) {
 		const swimlaneEl = columnEl.closest<HTMLElement>(`[${DATA_ATTRIBUTES.SWIMLANE_VALUE}]`);
 		const swimlaneValue = swimlaneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) ?? null;
-		headerEl.appendChild(cb.createAddButton(columnValue, swimlaneValue));
-	} else if (!hasFolder && existingAddBtn) {
+		const addBtn = cb.createAddButton(columnValue, swimlaneValue);
+		const menuBtn = headerEl.querySelector(`.${CSS_CLASSES.COLUMN_MENU_BTN}`);
+		headerEl.insertBefore(addBtn, menuBtn);
+	} else if (!allowAdd && existingAddBtn) {
 		existingAddBtn.remove();
 	}
 
@@ -145,7 +170,7 @@ export function patchColumnCards(
 		if (existing && ctx.cardFingerprints.get(entry.file.path) === fp) {
 			return;
 		}
-		const newCard = createCard(entry, ctx.card, ctx.cardCb);
+		const newCard = createCard(entry, columnValue ?? '', ctx.card, ctx.cardCb);
 		ctx.cardFingerprints.set(entry.file.path, fp);
 		if (existing) {
 			body.replaceChild(newCard, existing);
