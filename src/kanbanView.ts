@@ -976,8 +976,7 @@ export class KanbanView extends BasesView {
 		orderedColumnValues.forEach((colValue) => {
 			const entries = groupedEntries.get(colValue) ?? [];
 			if (!existingColumns.has(colValue)) {
-				const options = laneValue !== null ? { swimlaneValue: laneValue } : {};
-				const colEl = this.createColumn(colValue, entries, options);
+				const colEl = this.createColumn(colValue, entries, { swimlaneValue: laneValue });
 				containerEl.appendChild(colEl);
 				existingColumns.set(colValue, colEl);
 				const cardBody = colEl.querySelector<HTMLElement>(
@@ -1221,10 +1220,9 @@ export class KanbanView extends BasesView {
 		applyColumnColorEl(columnEl, colorName);
 	}
 
-	private openColumnMenu(evt: MouseEvent, value: string, columnEl: HTMLElement): void {
+	private openColumnMenu(evt: MouseEvent, value: string, _columnEl: HTMLElement): void {
 		const menu = new Menu();
 		const isHidden = this._prefs.hiddenColumns.has(value);
-		const inSwimlane = !!columnEl.closest(`.${CSS_CLASSES.SWIMLANE}`);
 
 		menu.addItem((item) => {
 			item.setTitle(isHidden ? 'Unhide column' : 'Hide column');
@@ -1262,11 +1260,16 @@ export class KanbanView extends BasesView {
 			});
 		}
 
-		// Remove is only meaningful for an empty, non-archived column in flat mode:
-		// a column that still holds cards reappears on the next render, and in
-		// swimlane mode a column spans every lane.
-		const isEmpty = columnEl.querySelectorAll(`.${CSS_CLASSES.CARD}`).length === 0;
-		if (value !== ARCHIVED_LABEL && !inSwimlane && isEmpty) {
+		// Remove is only meaningful for a globally-empty, non-archived column: a
+		// column that still holds cards anywhere reappears on the next render. In
+		// swimlane mode the column spans every lane, so check every rendered node
+		// for this value, not just the one the menu was opened from (#90).
+		let isGloballyEmpty = true;
+		this.containerEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.COLUMN}`).forEach((el) => {
+			if (el.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE) !== value) return;
+			if (el.querySelector(`.${CSS_CLASSES.CARD}`)) isGloballyEmpty = false;
+		});
+		if (value !== ARCHIVED_LABEL && isGloballyEmpty) {
 			menu.addItem((item) => {
 				item.setTitle('Remove column');
 				item.setIcon('trash-2');

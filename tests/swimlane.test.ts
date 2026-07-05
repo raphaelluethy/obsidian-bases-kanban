@@ -197,10 +197,12 @@ describe('Swimlane rendering behavior', () => {
 		swimlaneProperty = PROPERTY_PRIORITY;
 	});
 
-	test('empty swimlane cells do not offer a Remove column menu action', () => {
+	test('a lane-empty cell of a column with cards elsewhere does not offer Remove column', () => {
 		const { view } = createSwimlaneView(() => swimlaneProperty);
 		triggerDataUpdate(view);
 
+		// "Done" is empty in the High lane but holds a card in the Low lane, so it
+		// is not globally empty and removing it would orphan that card's column.
 		const highLane = getLane(view, 'High');
 		const emptyDoneCell = getColumnWithin(highLane, 'Done');
 		const header = emptyDoneCell.querySelector(`.${CSS_CLASSES.COLUMN_HEADER}`) as HTMLElement;
@@ -209,7 +211,7 @@ describe('Swimlane rendering behavior', () => {
 		header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
 
 		const removeItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Remove column');
-		assert.strictEqual(removeItem, undefined, 'Swimlane column cells should not offer a global remove-column action');
+		assert.strictEqual(removeItem, undefined, 'A column with cards in another lane should not offer Remove column');
 	});
 
 	test('dragging a column in one swimlane reorders that column across all lanes', () => {
@@ -428,6 +430,92 @@ describe('Swimlane patch path', () => {
 		assert.ok(
 			view.containerEl.querySelector(`[${DATA_ATTRIBUTES.SWIMLANE_VALUE}="Medium"]`),
 			'Medium lane element exists',
+		);
+	});
+});
+
+describe('Swimlane globally-empty column removal via the column menu (#90)', () => {
+	const swimlaneProperty = () => PROPERTY_PRIORITY;
+
+	// Persist a column order containing "Blocked" — a value no entry has, so it is
+	// empty across EVERY lane and therefore globally empty.
+	function createViewWithGloballyEmptyColumn(): { view: KanbanView; controller: any } {
+		const { view, controller } = createSwimlaneView(swimlaneProperty);
+		controller.config.set('columnOrders', {
+			[PROPERTY_STATUS]: ['To Do', 'Done', 'Blocked'],
+		});
+		triggerDataUpdate(view);
+		return { view, controller };
+	}
+
+	function openColumnMenuIn(view: KanbanView, laneValue: string, columnValue: string) {
+		const lane = getLane(view, laneValue);
+		const header = getColumnWithin(lane, columnValue).querySelector(`.${CSS_CLASSES.COLUMN_HEADER}`) as HTMLElement;
+		MockMenu.lastInstance = null;
+		header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		return MockMenu.lastInstance;
+	}
+
+	test('a column empty across ALL lanes offers Remove column in each lane', () => {
+		const { view } = createViewWithGloballyEmptyColumn();
+
+		for (const laneValue of ['High', 'Low']) {
+			const menu = openColumnMenuIn(view, laneValue, 'Blocked');
+			assert.ok(
+				menu?.items.find((item) => item.title === 'Remove column'),
+				`Globally-empty column "Blocked" should offer Remove column in lane "${laneValue}"`,
+			);
+		}
+	});
+
+	test('a column empty in some lanes but not others offers no Remove column action', () => {
+		const { view } = createViewWithGloballyEmptyColumn();
+
+		// "Done" is empty in the High lane but has an entry in the Low lane, so it is
+		// not globally empty and must not offer a remove action anywhere.
+		const menu = openColumnMenuIn(view, 'High', 'Done');
+		assert.strictEqual(
+			menu?.items.find((item) => item.title === 'Remove column'),
+			undefined,
+			'A column with entries in other lanes should not offer a remove action',
+		);
+	});
+
+	test('Remove column removes the column from ALL lane DOM nodes', () => {
+		const { view } = createViewWithGloballyEmptyColumn();
+
+		assert.strictEqual(
+			view.containerEl.querySelectorAll(`[${DATA_ATTRIBUTES.COLUMN_VALUE}="Blocked"]`).length,
+			2,
+			'Precondition: "Blocked" should exist in both lanes',
+		);
+
+		const menu = openColumnMenuIn(view, 'High', 'Blocked');
+		const removeItem = menu?.items.find((item) => item.title === 'Remove column');
+		assert.ok(removeItem, 'Precondition: Remove column menu item should exist');
+		removeItem.onClick?.();
+
+		assert.strictEqual(
+			view.containerEl.querySelectorAll(`[${DATA_ATTRIBUTES.COLUMN_VALUE}="Blocked"]`).length,
+			0,
+			'"Blocked" should be removed from every lane DOM node',
+		);
+	});
+
+	test('Remove column removes the value from saved column order', () => {
+		const { view, controller } = createViewWithGloballyEmptyColumn();
+
+		const menu = openColumnMenuIn(view, 'High', 'Blocked');
+		const removeItem = menu?.items.find((item) => item.title === 'Remove column');
+		assert.ok(removeItem, 'Precondition: Remove column menu item should exist');
+		removeItem.onClick?.();
+
+		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]>;
+		const savedOrder = savedOrders?.[PROPERTY_STATUS] ?? [];
+		assert.ok(!savedOrder.includes('Blocked'), 'Removed column should not appear in saved order');
+		assert.ok(
+			!(view as any)._prefs.columnOrder.includes('Blocked'),
+			'Removed column should not appear in in-memory column order',
 		);
 	});
 });
