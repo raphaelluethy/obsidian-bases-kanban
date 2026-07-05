@@ -3,6 +3,7 @@ import { beforeEach, describe, test } from 'node:test';
 import type { BasesEntry, BasesPropertyId } from 'obsidian';
 import { CSS_CLASSES, DATA_ATTRIBUTES, SWIMLANE_KEY_SEPARATOR, UNCATEGORIZED_LABEL } from '../src/constants.ts';
 import { isCardOrders, isCollapsedLanes, isColumnOrders, KanbanView } from '../src/kanbanView.ts';
+import { Menu as MockMenu } from './mocks/obsidian.ts';
 import {
 	createDivWithMethods,
 	createMockApp,
@@ -196,18 +197,19 @@ describe('Swimlane rendering behavior', () => {
 		swimlaneProperty = PROPERTY_PRIORITY;
 	});
 
-	test('empty swimlane cells do not render global column remove buttons', () => {
+	test('empty swimlane cells do not offer a Remove column menu action', () => {
 		const { view } = createSwimlaneView(() => swimlaneProperty);
 		triggerDataUpdate(view);
 
 		const highLane = getLane(view, 'High');
 		const emptyDoneCell = getColumnWithin(highLane, 'Done');
+		const header = emptyDoneCell.querySelector(`.${CSS_CLASSES.COLUMN_HEADER}`) as HTMLElement;
 
-		assert.strictEqual(
-			emptyDoneCell.querySelector(`.${CSS_CLASSES.COLUMN_REMOVE_BTN}`),
-			null,
-			'Empty swimlane cells should not offer a global remove-column action',
-		);
+		MockMenu.lastInstance = null;
+		header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const removeItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Remove column');
+		assert.strictEqual(removeItem, undefined, 'Swimlane column cells should not offer a global remove-column action');
 	});
 
 	test('dragging a column in one swimlane reorders that column across all lanes', () => {
@@ -225,7 +227,7 @@ describe('Swimlane rendering behavior', () => {
 		(view as any).handleSwimlaneColumnDrop({ to: highBody });
 
 		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]>;
-		assert.deepStrictEqual(savedOrders[PROPERTY_STATUS], ['To Do', 'Done']);
+		assert.deepStrictEqual(savedOrders[PROPERTY_STATUS], ['To Do', 'Done', 'Archived']);
 
 		const laneBodies = Array.from(view.containerEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_BODY}`));
 		assert.ok(laneBodies.length > 1, 'Expected multiple lanes');

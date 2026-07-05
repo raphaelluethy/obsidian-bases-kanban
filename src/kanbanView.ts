@@ -1,6 +1,6 @@
-import type { BasesEntry, BasesPropertyId, HoverPopover, QueryController, ViewOption } from 'obsidian';
+import type { BasesEntry, BasesPropertyId, EventRef, HoverPopover, QueryController, ViewOption } from 'obsidian';
 import { BasesView, Keymap, Menu, Notice, normalizePath, parsePropertyId } from 'obsidian';
-import { computeCardFingerprint, type CardRenderCtx, type CardCallbacks } from './components/card.ts';
+import type { CardRenderCtx, CardCallbacks } from './components/card.ts';
 import {
 	createAddButton as createAddButtonEl,
 	createQuickAddCard as createQuickAddCardEl,
@@ -33,6 +33,7 @@ import {
 	DEBOUNCE_DELAY,
 	EMPTY_STATE_MESSAGES,
 	HOVER_LINK_SOURCE_ID,
+	SETTINGS_CHANGED_EVENT,
 	SORTABLE_CONFIG,
 	SORTABLE_GROUP,
 	SORTED_CARD_ORDER_NOTICE,
@@ -51,6 +52,23 @@ export interface LegacyData {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null;
+}
+
+/** Minimal shape of the workspace's event bus, used to guard optional wiring in tests. */
+interface WorkspaceEventBus {
+	on(name: string, callback: () => void): EventRef;
+	offref(ref: EventRef): void;
+}
+
+function isWorkspaceEventBus(value: unknown): value is WorkspaceEventBus {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'on' in value &&
+		typeof value.on === 'function' &&
+		'offref' in value &&
+		typeof value.offref === 'function'
+	);
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -101,6 +119,9 @@ export class KanbanView extends BasesView {
 	private swimlaneColumnSortables: Map<string | null, Sortable> = new Map();
 	private _debouncedRender: DebouncedFn<() => void>;
 	private activeColorPicker: HTMLElement | null = null;
+	private _colorPickerDismiss: ((e: MouseEvent) => void) | null = null;
+	private _colorPickerKeydown: ((e: KeyboardEvent) => void) | null = null;
+	private _settingsRefreshRef: EventRef | null = null;
 
 	/**
 	 * In-memory display preferences — the single source of truth during a session.
@@ -124,9 +145,10 @@ export class KanbanView extends BasesView {
 	private _lastBodyPreviewLength: number | undefined = undefined;
 	private _cardFingerprints: Map<string, string> = new Map();
 	private _bodyPreviewCache: Map<string, { mtime: number; text: string }> = new Map();
+	private _bodyPreviews: Map<string, string> = new Map();
 	private _pendingBodyPreviewLoads: Set<string> = new Set();
-	private _deferredSortableListeners: Map<string, { el: HTMLElement; handler: () => void }> = new Map();
 	private _temporarilyShowHiddenColumns = false;
+	private _archivedHasCards = false;
 	private bodyPreviewLength = 20;
 	private pluginSettings: KanbanPluginSettings;
 
@@ -211,6 +233,13 @@ export class KanbanView extends BasesView {
 				console.error('KanbanView error:', error);
 			}
 		}, DEBOUNCE_DELAY);
+
+		// Re-render live when the user changes global plugin settings. Guarded so
+		// it is a no-op in the test harness, whose workspace mock has no events.
+		const workspace: unknown = this.app?.workspace;
+		if (isWorkspaceEventBus(workspace)) {
+			this._settingsRefreshRef = workspace.on(SETTINGS_CHANGED_EVENT, () => this._debouncedRender());
+		}
 	}
 
 	onDataUpdated(): void {
@@ -435,6 +464,8 @@ export class KanbanView extends BasesView {
 			// Build path→entry lookup map for O(1) access in handleCardDrop
 			this._entryMap = new Map(entries.map((e: BasesEntry) => [e.file.path, e]));
 			this.queueBodyPreviewLoads(entries);
+			// Build the preview map once per render pass rather than once per column.
+			this._bodyPreviews = this.buildBodyPreviews();
 
 			// Group entries — 2D when swimlanes are active, 1D otherwise. The
 			// column-axis preference logic (order, colors, new-value detection)
@@ -493,9 +524,20 @@ export class KanbanView extends BasesView {
 				this._prefs.hiddenColumns.add(ARCHIVED_LABEL);
 				shouldPersistColumnOrder = true;
 			}
+			// Drop any hidden-column entry whose column no longer exists in the order
+			// (e.g. an Uncategorized column that emptied out) so the "N hidden" pill
+			// can never reference a column that can't be revealed.
+			for (const hidden of [...this._prefs.hiddenColumns]) {
+				if (!this._prefs.columnOrder.includes(hidden)) {
+					this._prefs.hiddenColumns.delete(hidden);
+					shouldPersistColumnOrder = true;
+				}
+			}
 			if (shouldPersistColumnOrder) {
 				this._persistPrefs();
 			}
+
+			this._archivedHasCards = (groupedEntries.get(ARCHIVED_LABEL)?.length ?? 0) > 0;
 
 			const orderedValues = this.getOrderedColumnValues(liveValues);
 			const visibleValues = this.getVisibleColumnValues(orderedValues);
@@ -579,13 +621,10 @@ export class KanbanView extends BasesView {
 		}
 		this.swimlaneColumnSortables.forEach((s) => s.destroy());
 		this.swimlaneColumnSortables.clear();
-		this._deferredSortableListeners.forEach(({ el, handler }) => {
-			el.removeEventListener('pointerdown', handler);
-		});
-		this._deferredSortableListeners.clear();
 	}
 
 	private fullReset(): void {
+		this.closeColorPicker();
 		this.containerEl.empty();
 		this.destroySortables();
 		this._entryMap.clear();
@@ -597,6 +636,7 @@ export class KanbanView extends BasesView {
 		lanes: Map<string | null, Map<string, BasesEntry[]>>,
 		hasSwimlanes: boolean,
 	): void {
+		this.closeColorPicker();
 		this.containerEl.empty();
 		this.containerEl.classList.toggle(CSS_CLASSES.VIEW_CONTAINER_WITH_SWIMLANES, hasSwimlanes);
 		this.destroySortables();
@@ -644,7 +684,7 @@ export class KanbanView extends BasesView {
 			this.swimlaneColumnSortables.set(null, this._createColumnSortable(boardEl));
 		}
 
-		this.updateHiddenColumnsIndicator(boardEl);
+		this.renderColumnControls(boardEl);
 	}
 
 	private _buildRowCtx(): RowRenderCtx {
@@ -741,9 +781,34 @@ export class KanbanView extends BasesView {
 
 		if (order.length === 0) return;
 
-		this._prefs.columnOrder = order;
+		this._prefs.columnOrder = this.applyColumnDropOrder(order);
 		this._persistPrefs();
 		this.render();
+	}
+
+	/**
+	 * A column drag only reorders the *visible* columns present in the DOM. Merge
+	 * that reordering back into the full column order so hidden columns keep their
+	 * absolute slots — otherwise they would be dropped from columnOrder (a hidden
+	 * empty column would vanish entirely, stranding it in hiddenColumns and leaving
+	 * a phantom "N hidden" pill).
+	 */
+	private applyColumnDropOrder(domOrder: string[]): string[] {
+		const domSet = new Set(domOrder);
+		const queue = [...domOrder];
+		const merged: string[] = [];
+		for (const value of this._prefs.columnOrder) {
+			if (domSet.has(value)) {
+				const next = queue.shift();
+				if (next !== undefined) merged.push(next);
+			} else {
+				// Not currently in the DOM (hidden) — keep it in its existing slot.
+				merged.push(value);
+			}
+		}
+		// Any DOM columns not previously tracked (freshly created) go at the end.
+		for (const remaining of queue) merged.push(remaining);
+		return merged;
 	}
 
 	private patchBoard(
@@ -875,7 +940,7 @@ export class KanbanView extends BasesView {
 			}
 		});
 
-		this.updateHiddenColumnsIndicator(boardEl);
+		this.renderColumnControls(boardEl);
 	}
 
 	private _patchColumns(
@@ -911,7 +976,7 @@ export class KanbanView extends BasesView {
 		orderedColumnValues.forEach((colValue) => {
 			const entries = groupedEntries.get(colValue) ?? [];
 			if (!existingColumns.has(colValue)) {
-				const options = laneValue !== null ? { showRemoveButton: false as const, swimlaneValue: laneValue } : {};
+				const options = laneValue !== null ? { swimlaneValue: laneValue } : {};
 				const colEl = this.createColumn(colValue, entries, options);
 				containerEl.appendChild(colEl);
 				existingColumns.set(colValue, colEl);
@@ -919,17 +984,12 @@ export class KanbanView extends BasesView {
 					`.${CSS_CLASSES.COLUMN_BODY}[${DATA_ATTRIBUTES.SORTABLE_CONTAINER}]`,
 				);
 				if (cardBody) {
-					const key = this.cardOrderKey(laneValue, colValue);
-					const attachOnce = () => {
-						this.attachCardSortable(cardBody, key);
-						this._deferredSortableListeners.delete(key);
-						cardBody.removeEventListener('pointerdown', attachOnce);
-					};
-					cardBody.addEventListener('pointerdown', attachOnce);
-					this._deferredSortableListeners.set(key, {
-						el: cardBody,
-						handler: attachOnce,
-					});
+					// Attach eagerly (as fullRebuild and swimlane creation do). A prior
+					// deferred-on-pointerdown attach meant the Sortable was created during
+					// the very press meant to start the drag, and the DOM does not deliver
+					// that in-flight event to a listener added mid-dispatch — so the first
+					// drag on a patched-in column silently did nothing.
+					this.attachCardSortable(cardBody, this.cardOrderKey(laneValue, colValue));
 				} else {
 					console.warn('KanbanView: column body not found for new column; card drag will not work', colValue);
 				}
@@ -944,10 +1004,6 @@ export class KanbanView extends BasesView {
 			const colEl = existingColumns.get(colValue);
 			if (colEl) containerEl.appendChild(colEl);
 		});
-	}
-
-	private _computeCardFingerprint(entry: BasesEntry): string {
-		return computeCardFingerprint(entry, this._buildCardCtx());
 	}
 
 	private patchColumnCards(columnEl: HTMLElement, newEntries: BasesEntry[]): void {
@@ -1062,7 +1118,6 @@ export class KanbanView extends BasesView {
 			applyColumnColor: (el, name) => this.applyColumnColor(el, name),
 			onColorPickerClick: (anchor, col, val) => this.openColorPicker(anchor, col, val),
 			onColumnMenu: (evt, val, el) => this.openColumnMenu(evt, val, el),
-			onRemoveColumn: (val, el) => this.removeColumn(val, el),
 			createAddButton: (colVal, laneVal) => this.createAddButton(colVal, laneVal),
 			getQuickAddFolder: () => this.getQuickAddFolder(),
 		};
@@ -1071,7 +1126,7 @@ export class KanbanView extends BasesView {
 	private createColumn(
 		value: string,
 		entries: BasesEntry[],
-		options: { showRemoveButton?: boolean; swimlaneValue?: string | null } = {},
+		options: { swimlaneValue?: string | null } = {},
 	): HTMLElement {
 		return createColumnEl(value, entries, options, this._buildColumnCtx(), this._buildColumnCallbacks());
 	}
@@ -1089,7 +1144,7 @@ export class KanbanView extends BasesView {
 			order: this.config?.getOrder() ?? [],
 			getDisplayName: (id) => this.config?.getDisplayName(id) ?? id,
 			bodyPreviewLength: this.bodyPreviewLength,
-			bodyPreviews: this.getBodyPreviews(),
+			bodyPreviews: this._bodyPreviews,
 		};
 	}
 
@@ -1098,27 +1153,78 @@ export class KanbanView extends BasesView {
 			onHoverPreview: (lt, sp, e, el) => this.triggerHoverPreview(lt, sp, e, el),
 			onSetActiveCard: (path) => this.setActiveCard(path),
 			onOpenInBackgroundTab: (file) => this.openInBackgroundTab(file),
-			onArchiveCard: (file) => {
-				void this.archiveCard(file);
+			onOpenInNewTab: (file) => this.openInNewTab(file),
+			onArchiveCard: (file, columnValue) => {
+				void this.archiveCard(file, columnValue);
+			},
+			onUnarchiveCard: (file) => {
+				void this.unarchiveCard(file);
 			},
 		};
 	}
 
-	private async archiveCard(file: TFile): Promise<void> {
+	private async setCardColumnValue(file: TFile, columnPropertyName: string, columnValue: string): Promise<void> {
+		if (!this.app?.fileManager) return;
+		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+			if (columnValue === '' || columnValue === UNCATEGORIZED_LABEL) {
+				delete frontmatter[columnPropertyName];
+			} else {
+				frontmatter[columnPropertyName] = columnValue;
+			}
+		});
+	}
+
+	private async archiveCard(file: TFile, previousColumnValue: string): Promise<void> {
 		if (!this._prefsPropertyId || !this.app?.fileManager) return;
 		const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
-		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
-			frontmatter[columnPropertyName] = ARCHIVED_LABEL;
+		try {
+			await this.setCardColumnValue(file, columnPropertyName, ARCHIVED_LABEL);
+		} catch (error) {
+			console.error('Error archiving kanban card:', error);
+			new Notice('Could not archive card.');
+			return;
+		}
+		this.showArchiveUndoNotice(file, columnPropertyName, previousColumnValue);
+	}
+
+	private async unarchiveCard(file: TFile): Promise<void> {
+		if (!this._prefsPropertyId || !this.app?.fileManager) return;
+		const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
+		try {
+			// Original column is unknown once archived, so unarchiving returns the
+			// card to Uncategorized (matching a drag out of the Archived column).
+			await this.setCardColumnValue(file, columnPropertyName, UNCATEGORIZED_LABEL);
+		} catch (error) {
+			console.error('Error unarchiving kanban card:', error);
+			new Notice('Could not unarchive card.');
+		}
+	}
+
+	private showArchiveUndoNotice(file: TFile, columnPropertyName: string, previousColumnValue: string): void {
+		const doc = this.containerEl.doc;
+		const fragment = doc.createDocumentFragment();
+		fragment.appendChild(doc.createTextNode(`Archived "${file.basename}". `));
+		const undoLink = doc.createElement('a');
+		undoLink.textContent = 'Undo';
+		undoLink.className = CSS_CLASSES.NOTICE_UNDO;
+		undoLink.addEventListener('click', () => {
+			void this.setCardColumnValue(file, columnPropertyName, previousColumnValue).catch((error) => {
+				console.error('Error undoing archive:', error);
+				new Notice('Could not undo archive.');
+			});
 		});
+		fragment.appendChild(undoLink);
+		new Notice(fragment, 6000);
 	}
 
 	private applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
 		applyColumnColorEl(columnEl, colorName);
 	}
 
-	private openColumnMenu(evt: MouseEvent, value: string, _columnEl: HTMLElement): void {
+	private openColumnMenu(evt: MouseEvent, value: string, columnEl: HTMLElement): void {
 		const menu = new Menu();
 		const isHidden = this._prefs.hiddenColumns.has(value);
+		const inSwimlane = !!columnEl.closest(`.${CSS_CLASSES.SWIMLANE}`);
 
 		menu.addItem((item) => {
 			item.setTitle(isHidden ? 'Unhide column' : 'Hide column');
@@ -1129,7 +1235,7 @@ export class KanbanView extends BasesView {
 				} else {
 					this._prefs.hiddenColumns.add(value);
 				}
-				if (this._prefs.hiddenColumns.size === 0) this._temporarilyShowHiddenColumns = false;
+				if (this.userHiddenColumns().length === 0) this._temporarilyShowHiddenColumns = false;
 				this._persistPrefs();
 				this.render();
 			});
@@ -1156,8 +1262,17 @@ export class KanbanView extends BasesView {
 			});
 		}
 
-		menu.addSeparator();
-		this.addHiddenColumnRestoreItems(menu);
+		// Remove is only meaningful for an empty, non-archived column in flat mode:
+		// a column that still holds cards reappears on the next render, and in
+		// swimlane mode a column spans every lane.
+		const isEmpty = columnEl.querySelectorAll(`.${CSS_CLASSES.CARD}`).length === 0;
+		if (value !== ARCHIVED_LABEL && !inSwimlane && isEmpty) {
+			menu.addItem((item) => {
+				item.setTitle('Remove column');
+				item.setIcon('trash-2');
+				item.onClick(() => this.removeColumn(value));
+			});
+		}
 
 		menu.showAtMouseEvent(evt);
 	}
@@ -1169,7 +1284,8 @@ export class KanbanView extends BasesView {
 	}
 
 	private addHiddenColumnRestoreItems(menu: Menu): void {
-		if (this._prefs.hiddenColumns.size > 0) {
+		const userHidden = this.userHiddenColumns();
+		if (userHidden.length > 0) {
 			menu.addItem((item) => {
 				item.setTitle(this._temporarilyShowHiddenColumns ? 'Hide hidden columns' : 'Show hidden columns temporarily');
 				item.setIcon(this._temporarilyShowHiddenColumns ? 'eye-off' : 'eye');
@@ -1179,13 +1295,13 @@ export class KanbanView extends BasesView {
 				});
 			});
 			menu.addSeparator();
-			for (const hiddenValue of this._prefs.hiddenColumns) {
+			for (const hiddenValue of userHidden) {
 				menu.addItem((item) => {
 					item.setTitle(`Unhide: ${hiddenValue}`);
 					item.setIcon('eye');
 					item.onClick(() => {
 						this._prefs.hiddenColumns.delete(hiddenValue);
-						if (this._prefs.hiddenColumns.size === 0) this._temporarilyShowHiddenColumns = false;
+						if (this.userHiddenColumns().length === 0) this._temporarilyShowHiddenColumns = false;
 						this._persistPrefs();
 						this.render();
 					});
@@ -1200,65 +1316,130 @@ export class KanbanView extends BasesView {
 		}
 	}
 
-	private updateHiddenColumnsIndicator(boardEl: HTMLElement): void {
-		boardEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`)?.remove();
+	/**
+	 * Render the board toolbar above the columns. It holds a "Show archived"
+	 * control (when the Archived column is hidden) and a "N hidden" pill for
+	 * user-hidden columns. The built-in Archived column is deliberately excluded
+	 * from the hidden count so it never shows a phantom "1 hidden".
+	 */
+	private renderColumnControls(boardEl: HTMLElement): void {
+		const doc = this.containerEl.doc;
+		this.containerEl.querySelector(`.${CSS_CLASSES.BOARD_TOOLBAR}`)?.remove();
 
-		if (this._prefs.hiddenColumns.size === 0) return;
+		const userHidden = this.userHiddenColumns();
+		// Only surface the "Show archived" control when the Archived column is
+		// hidden AND actually holds cards — otherwise it is dead chrome revealing
+		// an empty column on boards where nothing has ever been archived.
+		const archivedHidden =
+			this._prefs.columnOrder.includes(ARCHIVED_LABEL) &&
+			this._prefs.hiddenColumns.has(ARCHIVED_LABEL) &&
+			this._archivedHasCards;
+		if (userHidden.length === 0 && !archivedHidden) return;
 
-		const indicator = boardEl.createDiv({
-			cls: CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR,
-			text: `${this._prefs.hiddenColumns.size} hidden`,
-		});
-		indicator.setAttribute('role', 'button');
-		indicator.setAttribute('aria-label', 'Toggle hidden columns');
-		indicator.setAttribute('aria-pressed', String(this._temporarilyShowHiddenColumns));
-		indicator.setAttribute('title', 'Click to show or hide hidden columns. Right-click for options.');
-		indicator.addEventListener('click', (evt) => {
-			evt.stopPropagation();
-			this._temporarilyShowHiddenColumns = !this._temporarilyShowHiddenColumns;
-			this.render();
-		});
-		indicator.addEventListener('contextmenu', (evt) => {
-			evt.preventDefault();
-			evt.stopPropagation();
-			this.openHiddenColumnsMenu(evt);
-		});
+		const toolbar = doc.createElement('div');
+		toolbar.className = CSS_CLASSES.BOARD_TOOLBAR;
 
-		if (this._temporarilyShowHiddenColumns) {
-			const firstHiddenColumn = Array.from(boardEl.children).find((child): child is HTMLElement => {
-				if (!child.instanceOf(HTMLElement) || !child.classList.contains(CSS_CLASSES.COLUMN)) return false;
-				const value = child.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE);
-				return value !== null && value !== ARCHIVED_LABEL && this._prefs.hiddenColumns.has(value);
+		if (userHidden.length > 0) {
+			const indicator = doc.createElement('div');
+			indicator.className = CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR;
+			indicator.textContent = `${userHidden.length} hidden`;
+			indicator.setAttribute('role', 'button');
+			indicator.setAttribute('tabindex', '0');
+			indicator.setAttribute('aria-label', 'Toggle hidden columns');
+			indicator.setAttribute('aria-pressed', String(this._temporarilyShowHiddenColumns));
+			indicator.setAttribute('title', 'Click to show or hide hidden columns. Right-click for options.');
+			const toggleTemporary = () => {
+				this._temporarilyShowHiddenColumns = !this._temporarilyShowHiddenColumns;
+				this.render();
+			};
+			indicator.addEventListener('click', (evt) => {
+				evt.stopPropagation();
+				toggleTemporary();
 			});
-			if (firstHiddenColumn) boardEl.insertBefore(indicator, firstHiddenColumn);
+			indicator.addEventListener('keydown', (evt) => {
+				if (evt.key !== 'Enter' && evt.key !== ' ') return;
+				evt.preventDefault();
+				evt.stopPropagation();
+				toggleTemporary();
+			});
+			indicator.addEventListener('contextmenu', (evt) => {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.openHiddenColumnsMenu(evt);
+			});
+			toolbar.appendChild(indicator);
 		}
+
+		if (archivedHidden) {
+			const archiveBtn = doc.createElement('div');
+			archiveBtn.className = CSS_CLASSES.ARCHIVED_TOGGLE;
+			archiveBtn.textContent = 'Show archived';
+			archiveBtn.setAttribute('role', 'button');
+			archiveBtn.setAttribute('tabindex', '0');
+			archiveBtn.setAttribute('aria-label', 'Show archived column');
+			archiveBtn.setAttribute('title', 'Reveal the archived column');
+			const showArchived = () => {
+				this._prefs.hiddenColumns.delete(ARCHIVED_LABEL);
+				this._persistPrefs();
+				this.render();
+			};
+			archiveBtn.addEventListener('click', (evt) => {
+				evt.stopPropagation();
+				showArchived();
+			});
+			archiveBtn.addEventListener('keydown', (evt) => {
+				if (evt.key !== 'Enter' && evt.key !== ' ') return;
+				evt.preventDefault();
+				evt.stopPropagation();
+				showArchived();
+			});
+			toolbar.appendChild(archiveBtn);
+		}
+
+		this.containerEl.insertBefore(toolbar, boardEl);
+	}
+
+	/** Hidden columns the user chose to hide — excludes the built-in Archived column. */
+	private userHiddenColumns(): string[] {
+		return [...this._prefs.hiddenColumns].filter((value) => value !== ARCHIVED_LABEL);
 	}
 
 	private getVisibleColumnValues(orderedValues: string[]): string[] {
-		if (this._prefs.hiddenColumns.size === 0) {
+		if (this.userHiddenColumns().length === 0) {
 			this._temporarilyShowHiddenColumns = false;
-			return orderedValues;
 		}
-		if (!this._temporarilyShowHiddenColumns) {
-			return orderedValues.filter((value) => !this._prefs.hiddenColumns.has(value));
-		}
-
-		const visibleColumns = orderedValues.filter(
-			(value) => !this._prefs.hiddenColumns.has(value) && value !== ARCHIVED_LABEL,
-		);
-		const archivedColumn = orderedValues.includes(ARCHIVED_LABEL) ? [ARCHIVED_LABEL] : [];
-		const hiddenColumns = orderedValues.filter(
-			(value) => this._prefs.hiddenColumns.has(value) && value !== ARCHIVED_LABEL,
-		);
-		return [...visibleColumns, ...archivedColumn, ...hiddenColumns];
+		// Filter in place so columns keep their true order (Archived stays pinned
+		// last). Archived is governed solely by its own hidden state — toggled via
+		// the "Show archived" control — never by the temporary reveal.
+		return orderedValues.filter((value) => {
+			if (!this._prefs.hiddenColumns.has(value)) return true;
+			if (value === ARCHIVED_LABEL) return false;
+			return this._temporarilyShowHiddenColumns;
+		});
 	}
 
-	private getBodyPreviews(): Map<string, string> {
+	private buildBodyPreviews(): Map<string, string> {
 		if (this.bodyPreviewLength <= 0) return new Map();
 		const previews = new Map<string, string>();
 		for (const [path, cached] of this._bodyPreviewCache.entries()) {
-			const preview = Array.from(cached.text).slice(0, this.bodyPreviewLength).join('');
-			if (preview) previews.set(path, preview);
+			const chars = Array.from(cached.text);
+			if (chars.length === 0) continue;
+			if (chars.length <= this.bodyPreviewLength) {
+				previews.set(path, cached.text);
+				continue;
+			}
+			let clipped = chars.slice(0, this.bodyPreviewLength).join('');
+			// Trim back to a word boundary so previews don't cut mid-word — but only
+			// when the cut actually lands inside a word. If the next character is
+			// whitespace, the cut is already clean and trimming would drop an intact
+			// final word. A single word longer than the limit is left hard-cut.
+			const cutInsideWord = !/\s/.test(chars[this.bodyPreviewLength] ?? ' ');
+			if (cutInsideWord) {
+				const wordTrimmed = clipped.replace(/\s+\S*$/, '');
+				if (wordTrimmed.length > 0) clipped = wordTrimmed;
+			}
+			// Append an ellipsis so truncation reads as intentional.
+			previews.set(path, `${clipped.trimEnd()}…`);
 		}
 		return previews;
 	}
@@ -1297,25 +1478,50 @@ export class KanbanView extends BasesView {
 		return withoutFrontmatter.replace(/\s+/g, ' ').trim();
 	}
 
-	private openColorPicker(anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string): void {
+	private closeColorPicker(): void {
+		const doc = this.containerEl.doc;
+		if (this._colorPickerDismiss) {
+			doc.removeEventListener('click', this._colorPickerDismiss);
+			this._colorPickerDismiss = null;
+		}
+		if (this._colorPickerKeydown) {
+			doc.removeEventListener('keydown', this._colorPickerKeydown);
+			this._colorPickerKeydown = null;
+		}
 		this.activeColorPicker?.remove();
 		this.activeColorPicker = null;
+	}
+
+	private openColorPicker(anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string): void {
+		this.closeColorPicker();
 
 		const popover = anchorEl.doc.createElement('div');
 		popover.className = CSS_CLASSES.COLUMN_COLOR_POPOVER;
 
 		const currentColor = columnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_COLOR);
 
+		// Make a swatch operable by both mouse and keyboard.
+		const wireSwatch = (swatch: HTMLElement, label: string, activate: () => void): void => {
+			swatch.setAttribute('role', 'button');
+			swatch.setAttribute('tabindex', '0');
+			swatch.setAttribute('aria-label', label);
+			swatch.title = label;
+			swatch.addEventListener('click', activate);
+			swatch.addEventListener('keydown', (e) => {
+				if (e.key !== 'Enter' && e.key !== ' ') return;
+				e.preventDefault();
+				activate();
+			});
+		};
+
 		const noneSwatch = anchorEl.doc.createElement('div');
 		noneSwatch.className = `${CSS_CLASSES.COLUMN_COLOR_SWATCH} ${CSS_CLASSES.COLUMN_COLOR_NONE}`;
 		if (!currentColor) noneSwatch.classList.add(CSS_CLASSES.COLUMN_COLOR_SWATCH_ACTIVE);
-		noneSwatch.title = 'No color';
-		noneSwatch.addEventListener('click', () => {
+		wireSwatch(noneSwatch, 'No color', () => {
 			this.applyColumnColor(columnEl, null);
 			delete this._prefs.columnColors[columnValue];
 			this._persistPrefs();
-			popover.remove();
-			this.activeColorPicker = null;
+			this.closeColorPicker();
 		});
 		popover.appendChild(noneSwatch);
 
@@ -1323,32 +1529,39 @@ export class KanbanView extends BasesView {
 			const swatch = anchorEl.doc.createElement('div');
 			swatch.className = CSS_CLASSES.COLUMN_COLOR_SWATCH;
 			swatch.style.background = color.cssVar;
-			swatch.title = color.name;
 			if (currentColor === color.name) swatch.classList.add(CSS_CLASSES.COLUMN_COLOR_SWATCH_ACTIVE);
-			swatch.addEventListener('click', () => {
+			wireSwatch(swatch, color.name, () => {
 				this.applyColumnColor(columnEl, color.name);
 				this._prefs.columnColors[columnValue] = color.name;
 				this._persistPrefs();
-				popover.remove();
-				this.activeColorPicker = null;
+				this.closeColorPicker();
 			});
 			popover.appendChild(swatch);
 		}
 
-		const rect = anchorEl.getBoundingClientRect();
-		popover.style.top = `${rect.bottom + 4}px`;
-		popover.style.left = `${rect.left}px`;
 		anchorEl.doc.body.appendChild(popover);
 		this.activeColorPicker = popover;
 
-		const dismiss = (e: MouseEvent) => {
+		// Position below the anchor, clamped to stay within the viewport.
+		const rect = anchorEl.getBoundingClientRect();
+		const popRect = popover.getBoundingClientRect();
+		const viewportWidth = anchorEl.doc.defaultView?.innerWidth ?? rect.right;
+		const viewportHeight = anchorEl.doc.defaultView?.innerHeight ?? rect.bottom;
+		const left = Math.max(4, Math.min(rect.left, viewportWidth - popRect.width - 4));
+		const top = Math.max(4, Math.min(rect.bottom + 4, viewportHeight - popRect.height - 4));
+		popover.style.top = `${top}px`;
+		popover.style.left = `${left}px`;
+
+		this._colorPickerDismiss = (e: MouseEvent) => {
 			if (e.target instanceof Node && !popover.contains(e.target) && e.target !== anchorEl) {
-				popover.remove();
-				this.activeColorPicker = null;
-				anchorEl.doc.removeEventListener('click', dismiss);
+				this.closeColorPicker();
 			}
 		};
-		anchorEl.doc.addEventListener('click', dismiss);
+		this._colorPickerKeydown = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') this.closeColorPicker();
+		};
+		anchorEl.doc.addEventListener('click', this._colorPickerDismiss);
+		anchorEl.doc.addEventListener('keydown', this._colorPickerKeydown);
 	}
 
 	private getQuickAddFolder(): string | null {
@@ -1393,20 +1606,19 @@ export class KanbanView extends BasesView {
 		closeNativeNewItemPopoverEl(this.containerEl.doc);
 	}
 
-	private detachColumn(value: string, colEl: HTMLElement): void {
-		const sortable = this._columnSortables.get(value);
-		if (sortable) {
-			sortable.destroy();
-			this._columnSortables.delete(value);
-		}
-		colEl.remove();
-	}
-
-	private removeColumn(value: string, columnEl: HTMLElement): void {
+	private removeColumn(value: string): void {
 		if (!this._prefsPropertyId) return;
 		this._prefs.columnOrder = this._prefs.columnOrder.filter((v) => v !== value);
+		// A removed column must not linger in hiddenColumns — otherwise the
+		// "N hidden" pill keeps counting a column that no longer exists and can
+		// never be restored (reachable by removing a temporarily-revealed hidden
+		// column). Clear it and reset the temporary reveal if nothing is left.
+		this._prefs.hiddenColumns.delete(value);
+		if (this.userHiddenColumns().length === 0) this._temporarilyShowHiddenColumns = false;
 		this._persistPrefs();
-		this.detachColumn(value, columnEl);
+		// Re-render so both the columns and the toolbar reconcile (the removed
+		// column's Sortable is torn down by the patch path).
+		this.render();
 	}
 
 	private attachCardSortable(body: HTMLElement, value: string): void {
@@ -1589,6 +1801,12 @@ export class KanbanView extends BasesView {
 	 * synchronously plus over several animation frames — so no paint shows the
 	 * clamped state.
 	 */
+	/** Open the file in a new tab and focus it — the standard "Open in new tab" behavior. */
+	private openInNewTab(file: TFile): void {
+		if (!this.app?.workspace) return;
+		void this.app.workspace.getLeaf('tab').openFile(file);
+	}
+
 	private openInBackgroundTab(file: TFile): void {
 		if (!this.app?.workspace) return;
 
@@ -1679,8 +1897,12 @@ export class KanbanView extends BasesView {
 	onClose(): void {
 		this._debouncedRender.cancel();
 		this.destroySortables();
-		this.activeColorPicker?.remove();
-		this.activeColorPicker = null;
+		this.closeColorPicker();
+		const workspace: unknown = this.app?.workspace;
+		if (this._settingsRefreshRef && isWorkspaceEventBus(workspace)) {
+			workspace.offref(this._settingsRefreshRef);
+			this._settingsRefreshRef = null;
+		}
 	}
 
 	/**

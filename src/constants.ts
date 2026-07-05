@@ -11,6 +11,9 @@ export const ARCHIVED_LABEL = 'Archived';
 /** Source id registered with Obsidian's Page Preview core plugin */
 export const HOVER_LINK_SOURCE_ID = 'kanban-bases-view';
 
+/** Workspace event fired when global plugin settings change, so open views re-render live */
+export const SETTINGS_CHANGED_EVENT = 'kanban-bases-view:settings-changed';
+
 /** Color palette for column accents, using Obsidian design system variables */
 export const COLOR_PALETTE = [
 	{ name: 'red', cssVar: 'var(--color-red)' },
@@ -25,7 +28,7 @@ export const COLOR_PALETTE = [
 
 export type ColorName = (typeof COLOR_PALETTE)[number]['name'];
 
-/** Sortable.js group name for kanban columns */
+/** Sortable.js group name shared by all card lists so cards can move between columns */
 export const SORTABLE_GROUP = 'obk-columns';
 
 /** Notice shown when Base sorting prevents manual card ordering */
@@ -36,7 +39,6 @@ export const DATA_ATTRIBUTES = {
 	COLUMN_VALUE: 'data-column-value',
 	ENTRY_PATH: 'data-entry-path',
 	SORTABLE_CONTAINER: 'data-sortable-container',
-	COLUMN_POSITION: 'data-column-position',
 	COLUMN_COLOR: 'data-column-color',
 	SWIMLANE_VALUE: 'data-swimlane-value',
 } as const;
@@ -54,6 +56,7 @@ export const CSS_CLASSES = {
 	VIEW_CONTAINER_WITH_SWIMLANES: 'obk-view-container--with-swimlanes',
 	BOARD: 'obk-board',
 	BOARD_WITH_SWIMLANES: 'obk-board--with-swimlanes',
+	BOARD_TOOLBAR: 'obk-board-toolbar',
 
 	// Swimlane (horizontal grouping band)
 	SWIMLANE: 'obk-swimlane',
@@ -67,11 +70,6 @@ export const CSS_CLASSES = {
 	SWIMLANE_DRAGGING: 'obk-swimlane-dragging',
 	SWIMLANE_GHOST: 'obk-swimlane-ghost',
 
-	// Property selector (for future or framework-driven UI)
-	PROPERTY_SELECTOR: 'obk-property-selector',
-	PROPERTY_LABEL: 'obk-property-label',
-	PROPERTY_SELECT: 'obk-property-select',
-
 	// Column
 	COLUMN: 'obk-column',
 	COLUMN_HEADER: 'obk-column-header',
@@ -84,8 +82,12 @@ export const CSS_CLASSES = {
 	COLUMN_ADD_BTN: 'obk-column-add-btn',
 	COLUMN_MENU_BTN: 'obk-column-menu-btn',
 
-	// Hidden columns restore indicator (shown when one or more columns are hidden)
+	// Board toolbar (above the columns): hidden-columns pill + show-archived control
 	HIDDEN_COLUMNS_INDICATOR: 'obk-hidden-columns-indicator',
+	ARCHIVED_TOGGLE: 'obk-archived-toggle',
+
+	// Clickable "Undo" link inside the archive notice
+	NOTICE_UNDO: 'obk-notice-undo',
 
 	// Card
 	CARD: 'obk-card',
@@ -109,9 +111,6 @@ export const CSS_CLASSES = {
 
 	// Sortable placeholder (fallback / shared ghost style)
 	SORTABLE_GHOST: 'obk-sortable-ghost',
-
-	// Column remove button (shown only when column is empty)
-	COLUMN_REMOVE_BTN: 'obk-column-remove-btn',
 
 	// Quick add modal
 	QUICK_ADD_FORM: 'obk-quick-add-form',

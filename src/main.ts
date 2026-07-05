@@ -1,5 +1,5 @@
 import { Plugin } from 'obsidian';
-import { HOVER_LINK_SOURCE_ID } from './constants.ts';
+import { HOVER_LINK_SOURCE_ID, SETTINGS_CHANGED_EVENT } from './constants.ts';
 import { KanbanView, type LegacyData, isRecord, isColumnOrders, isColumnColors } from './kanbanView.ts';
 import { type KanbanPluginSettings, DEFAULT_SETTINGS, normalizeSettings, KanbanSettingTab } from './settings.ts';
 
@@ -17,6 +17,14 @@ export const KANBAN_VIEW_TYPE = 'kanban-view';
  *   - Current:  { columnOrders: { [propertyId]: string[] }, columnColors: { [propertyId]: { [value]: color } } }
  *   - Pre-v0.1: { [propertyId]: string[] }  (columnOrders only, no color support)
  */
+interface TriggerableWorkspace {
+	trigger(name: string): void;
+}
+
+function canTriggerWorkspaceEvent(value: unknown): value is TriggerableWorkspace {
+	return typeof value === 'object' && value !== null && 'trigger' in value && typeof value.trigger === 'function';
+}
+
 function parseLegacyData(data: unknown): LegacyData | null {
 	if (!isRecord(data)) return null;
 
@@ -41,12 +49,14 @@ function parseLegacyData(data: unknown): LegacyData | null {
 
 export default class KanbanBasesViewPlugin extends Plugin {
 	settings: KanbanPluginSettings = { ...DEFAULT_SETTINGS };
+	private storedData: unknown = null;
 
 	async onload() {
 		// Read any data previously saved to plugin.data.json and pass it to each
 		// view instance so it can lazily migrate state into the base config on
 		// first render. Once migrated, plugin.data.json is no longer consulted.
 		const raw: unknown = await this.loadData();
+		this.storedData = raw;
 		this.settings = normalizeSettings(raw);
 		const legacyData = parseLegacyData(raw);
 
@@ -65,6 +75,23 @@ export default class KanbanBasesViewPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new KanbanSettingTab(this.app, this));
+	}
+
+	/**
+	 * Persist settings without clobbering legacy per-base migration data that may
+	 * still live in plugin.data.json. saveData rewrites the whole file, so we merge
+	 * the current settings over the previously stored object rather than replacing
+	 * it. Then notify open views so they re-render with the new settings live.
+	 */
+	async saveSettings(): Promise<void> {
+		const base = isRecord(this.storedData) ? this.storedData : {};
+		const merged = { ...base, ...this.settings };
+		this.storedData = merged;
+		await this.saveData(merged);
+		const workspace: unknown = this.app?.workspace;
+		if (canTriggerWorkspaceEvent(workspace)) {
+			workspace.trigger(SETTINGS_CHANGED_EVENT);
+		}
 	}
 
 	onunload() {

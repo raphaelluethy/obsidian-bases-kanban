@@ -53,7 +53,7 @@ export class KanbanSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.textPreviewEnabled).onChange(async (value) => {
 					this.plugin.settings.textPreviewEnabled = value;
-					await this.plugin.saveData(this.plugin.settings);
+					await this.plugin.saveSettings();
 				}),
 			);
 
@@ -69,7 +69,7 @@ export class KanbanSettingTab extends PluginSettingTab {
 						let clamped = Number.isFinite(num) ? num : DEFAULT_SETTINGS.defaultTextPreviewLength;
 						clamped = Math.max(0, Math.min(200, Math.round(clamped)));
 						this.plugin.settings.defaultTextPreviewLength = clamped;
-						await this.plugin.saveData(this.plugin.settings);
+						await this.plugin.saveSettings();
 					}),
 			);
 	}

@@ -1,13 +1,14 @@
 import assert from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
 import { Notice } from 'obsidian';
-import { Menu as MockMenu } from './mocks/obsidian.ts';
+import { Menu as MockMenu, Notice as MockNotice } from './mocks/obsidian.ts';
 import type { BasesPropertyId } from 'obsidian';
 import {
 	ARCHIVED_LABEL,
 	CSS_CLASSES,
 	DEBOUNCE_DELAY,
 	HOVER_LINK_SOURCE_ID,
+	SETTINGS_CHANGED_EVENT,
 	SORTABLE_CONFIG,
 	SORTABLE_GROUP,
 	SORTED_CARD_ORDER_NOTICE,
@@ -64,6 +65,27 @@ const waitForBodyPreviewRender = async (): Promise<void> => {
 	await Promise.resolve();
 	await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_DELAY + 10));
 };
+
+// Column removal now lives in the column ⋮ menu (there is no standalone × button).
+// These helpers open a column's menu and inspect/activate its items.
+function getColumnMenuItems(view: KanbanView, columnValue: string): Array<{ title: string; onClick?: () => void }> {
+	const columnEl = view.containerEl.querySelector(`[data-column-value="${columnValue}"]`) as HTMLElement;
+	MockMenu.lastInstance = null;
+	(view as unknown as { openColumnMenu: (e: MouseEvent, v: string, el: HTMLElement) => void }).openColumnMenu(
+		new MouseEvent('click'),
+		columnValue,
+		columnEl,
+	);
+	return MockMenu.lastInstance?.items ?? [];
+}
+function hasRemoveColumnItem(view: KanbanView, columnValue: string): boolean {
+	return getColumnMenuItems(view, columnValue).some((item) => item.title === 'Remove column');
+}
+function removeColumnViaMenu(view: KanbanView, columnValue: string): void {
+	const item = getColumnMenuItems(view, columnValue).find((entry) => entry.title === 'Remove column');
+	if (!item?.onClick) throw new Error(`Remove column menu item not available for "${columnValue}"`);
+	item.onClick();
+}
 
 describe('KanbanView Initialization', () => {
 	let scrollEl: HTMLElement;
@@ -859,7 +881,7 @@ describe('Data Rendering - Card Rendering', () => {
 		await waitForBodyPreviewRender();
 
 		const preview = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(preview?.textContent, 'abcdefghijklmnopqrst');
+		assert.strictEqual(preview?.textContent, 'abcdefghijklmnopqrst…');
 	});
 
 	test('Card body preview length follows the configured value', async () => {
@@ -880,7 +902,7 @@ describe('Data Rendering - Card Rendering', () => {
 		await waitForBodyPreviewRender();
 
 		const preview = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(preview?.textContent, 'abcde');
+		assert.strictEqual(preview?.textContent, 'abcde…');
 	});
 
 	test('Card body preview is hidden when the configured length is zero', async () => {
@@ -901,6 +923,75 @@ describe('Data Rendering - Card Rendering', () => {
 		await waitForBodyPreviewRender();
 
 		assert.strictEqual(view.containerEl.querySelector('.obk-card-preview'), null);
+	});
+
+	test('Card body preview trims to a word boundary and appends an ellipsis', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		app = createMockApp({}, { [file.path]: 'The quick brown fox jumps' });
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+		controller.config.set('bodyPreviewLength', 12);
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(
+			preview?.textContent,
+			'The quick…',
+			'Preview should not cut mid-word and should end with an ellipsis',
+		);
+	});
+
+	test('Card body preview keeps an intact final word when the cut lands on a boundary', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		// Length 9 lands exactly after "quick" ("The quick| brown") — the word is
+		// intact, so it must be kept rather than trimmed back to "The".
+		app = createMockApp({}, { [file.path]: 'The quick brown' });
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+		controller.config.set('bodyPreviewLength', 9);
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'The quick…', 'A clean boundary cut should keep the final word');
+	});
+
+	test('Card body preview shows full text without ellipsis when shorter than the limit', async () => {
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		app = createMockApp({}, { [file.path]: 'Short note' });
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => {
+			if (key === 'groupByProperty') return PROPERTY_STATUS;
+			return null;
+		};
+		controller.config.set('bodyPreviewLength', 50);
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+
+		const preview = view.containerEl.querySelector('.obk-card-preview');
+		assert.strictEqual(preview?.textContent, 'Short note', 'Text within the limit should render verbatim');
 	});
 
 	test('Card click handler opens file in workspace', () => {
@@ -1723,6 +1814,30 @@ describe('Column Reordering - Drag Handle', () => {
 		assert.ok(dragHandle, 'Drag handle should exist');
 		assert.ok(dragHandle?.classList.contains('obk-column-drag-handle'), 'Drag handle should have correct CSS class');
 	});
+
+	test('the column menu button opens the column menu on click and on keyboard activation', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const menuBtn = view.containerEl.querySelector('.obk-column-menu-btn') as HTMLElement;
+		assert.ok(menuBtn, 'Column menu button should exist');
+		assert.strictEqual(menuBtn.getAttribute('role'), 'button', 'Menu button should be an accessible button');
+		assert.strictEqual(menuBtn.getAttribute('tabindex'), '0', 'Menu button should be keyboard-focusable');
+
+		MockMenu.lastInstance = null;
+		menuBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		assert.ok(MockMenu.lastInstance, 'Clicking the menu button should open the column menu');
+
+		MockMenu.lastInstance = null;
+		menuBtn.dispatchEvent(new (window as any).KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		assert.ok(MockMenu.lastInstance, 'Pressing Enter on the menu button should open the column menu');
+	});
 });
 
 describe('Column Reordering - Sortable Initialization', () => {
@@ -2472,18 +2587,6 @@ describe('Hidden columns', () => {
 		);
 	}
 
-	function getFlatBoardChildOrder(view: KanbanView): string[] {
-		const board = view.containerEl.querySelector(`.${CSS_CLASSES.BOARD}`) as HTMLElement;
-		return Array.from(board.children)
-			.map((child) => {
-				if (!child.instanceOf(HTMLElement)) return null;
-				if (child.classList.contains(CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR)) return 'indicator';
-				if (child.classList.contains(CSS_CLASSES.COLUMN)) return child.getAttribute('data-column-value');
-				return null;
-			})
-			.filter((value): value is string => value !== null);
-	}
-
 	function hideColumnViaMenu(view: KanbanView, columnValue: string, columnEl: HTMLElement): void {
 		(view as any).openColumnMenu(new MouseEvent('click'), columnValue, columnEl);
 		const hideItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Hide column');
@@ -2568,13 +2671,22 @@ describe('Hidden columns', () => {
 		assert.strictEqual((view2 as any)._prefs.hiddenColumns.size, 2);
 	});
 
-	test('hidden columns indicator reflects the default archived column and manually hidden columns', () => {
+	test('hidden-columns count reflects only user-hidden columns, not the built-in Archived', () => {
 		const view = setupStatusView();
 		triggerDataUpdate(view);
 
-		const initialIndicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`);
-		assert.ok(initialIndicator, 'Indicator should appear for the default hidden Archived column');
-		assert.strictEqual(initialIndicator?.textContent, '1 hidden');
+		// The built-in Archived column is hidden but empty here, so there is no
+		// count pill and no Show archived control — the board has no toolbar at all.
+		assert.strictEqual(
+			view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`),
+			null,
+			'The built-in Archived column should not produce a hidden-columns count',
+		);
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-archived-toggle'),
+			null,
+			'An empty hidden Archived column should not surface a Show archived control',
+		);
 
 		const doingColumn = view.containerEl.querySelector(
 			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
@@ -2582,11 +2694,11 @@ describe('Hidden columns', () => {
 		hideColumnViaMenu(view, 'Doing', doingColumn);
 
 		const indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`);
-		assert.ok(indicator, 'Indicator should appear when a column is hidden');
-		assert.strictEqual(indicator?.textContent, '2 hidden');
+		assert.ok(indicator, 'Indicator should appear when a user column is hidden');
+		assert.strictEqual(indicator?.textContent, '1 hidden');
 	});
 
-	test('clicking the hidden columns indicator toggles hidden columns to the right of the button', () => {
+	test('clicking the hidden columns indicator temporarily reveals user-hidden columns in place', () => {
 		const view = setupStatusView(createEntriesWithStatus(), {
 			columnOrder: ['To Do', 'Doing', 'Done'],
 		});
@@ -2596,25 +2708,26 @@ describe('Hidden columns', () => {
 			`.${CSS_CLASSES.COLUMN}[data-column-value="Doing"]`,
 		) as HTMLElement;
 		hideColumnViaMenu(view, 'Doing', doingColumn);
+		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Done']);
 
 		MockMenu.lastInstance = null;
 		let indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`) as HTMLElement;
 		indicator.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
-		assert.strictEqual(MockMenu.lastInstance, null, 'Clicking the indicator should not open a menu with column names');
+		assert.strictEqual(MockMenu.lastInstance, null, 'Left-clicking the indicator should not open a menu');
 		assert.deepStrictEqual(
-			getFlatBoardChildOrder(view),
-			['To Do', 'Done', ARCHIVED_LABEL, 'indicator', 'Doing'],
-			'Hidden columns should appear to the right of the indicator button',
+			getRenderedColumnValues(view),
+			['To Do', 'Doing', 'Done'],
+			'Hidden column should reappear in its true position while temporarily shown',
 		);
-		assert.ok((view as any)._prefs.hiddenColumns.has('Doing'), 'Click toggle should not permanently unhide Doing');
+		assert.ok((view as any)._prefs.hiddenColumns.has('Doing'), 'Temporary reveal should not permanently unhide Doing');
 
 		indicator = view.containerEl.querySelector(`.${CSS_CLASSES.HIDDEN_COLUMNS_INDICATOR}`) as HTMLElement;
 		indicator.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		assert.deepStrictEqual(getFlatBoardChildOrder(view), ['To Do', 'Done', 'indicator'], 'Second click should hide them');
+		assert.deepStrictEqual(getRenderedColumnValues(view), ['To Do', 'Done'], 'Second click should hide it again');
 	});
 
-	test('context menu temporarily shows hidden columns after the Archived column', () => {
+	test('context menu temporarily shows user-hidden columns in their true position', () => {
 		const view = setupStatusView(createEntriesWithStatus(), {
 			columnOrder: ['To Do', 'Doing', 'Done'],
 		});
@@ -2632,14 +2745,14 @@ describe('Hidden columns', () => {
 		temporaryShowItem?.onClick?.();
 
 		assert.deepStrictEqual(
-			getFlatBoardChildOrder(view),
-			['To Do', 'Done', ARCHIVED_LABEL, 'indicator', 'Doing'],
-			'Temporarily shown hidden columns should render after Archived and to the right of the indicator',
+			getRenderedColumnValues(view),
+			['To Do', 'Doing', 'Done'],
+			'Temporarily shown hidden columns should render in their true position',
 		);
 		assert.ok((view as any)._prefs.hiddenColumns.has('Doing'), 'Temporary show should not permanently unhide Doing');
 		assert.ok(
 			(view as any)._prefs.hiddenColumns.has(ARCHIVED_LABEL),
-			'Temporary show should not permanently unhide Archived',
+			'Archived stays hidden and governed by its own Show archived control',
 		);
 
 		(view as any).openHiddenColumnsMenu(new MouseEvent('contextmenu'));
@@ -3582,7 +3695,7 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 		app = createMockApp();
 	});
 
-	test('Remove button not shown on columns with entries', () => {
+	test('Remove column item not offered on columns with entries', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3594,12 +3707,12 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 
 		const columns = view.containerEl.querySelectorAll('.obk-column');
 		columns.forEach((col) => {
-			const removeBtn = col.querySelector('.obk-column-remove-btn');
-			assert.ok(!removeBtn, `Column "${col.getAttribute('data-column-value')}" should not have a remove button`);
+			const value = col.getAttribute('data-column-value') ?? '';
+			assert.ok(!hasRemoveColumnItem(view, value), `Column "${value}" should not offer a Remove column item`);
 		});
 	});
 
-	test('Remove button shown on empty column from saved order', () => {
+	test('Remove column item shown on empty column from saved order', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3612,35 +3725,26 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		const inProgressCol = view.containerEl.querySelector('[data-column-value="In Progress"]');
-		const removeBtn = inProgressCol?.querySelector('.obk-column-remove-btn');
-		assert.ok(removeBtn, 'Empty saved column should show a remove button');
+		assert.ok(hasRemoveColumnItem(view, 'In Progress'), 'Empty saved column should offer a Remove column item');
 	});
 
-	test('Remove button has correct aria-label', () => {
+	test('Remove column item is not offered for the Archived column', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
 		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
 		controller.config.set('columnOrders', {
-			[PROPERTY_STATUS]: ['To Do', 'Doing', 'Done', 'In Progress'],
+			[PROPERTY_STATUS]: ['To Do', 'Doing', 'Done', ARCHIVED_LABEL],
 		});
 
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		const removeBtn = view.containerEl
-			.querySelector('[data-column-value="In Progress"]')
-			?.querySelector('.obk-column-remove-btn');
-		assert.strictEqual(
-			removeBtn?.getAttribute('aria-label'),
-			'Remove column: In Progress',
-			'Remove button should have a descriptive aria-label',
-		);
+		assert.ok(!hasRemoveColumnItem(view, ARCHIVED_LABEL), 'Archived column should never offer a Remove column item');
 	});
 
-	test('Remove button appears when column becomes empty after data update', () => {
+	test('Remove column item appears when a column becomes empty after data update', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3650,11 +3754,7 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		assert.strictEqual(
-			view.containerEl.querySelectorAll('.obk-column-remove-btn').length,
-			0,
-			'No remove buttons should exist when all columns have entries',
-		);
+		assert.ok(!hasRemoveColumnItem(view, 'Doing'), 'A populated column should not offer removal');
 
 		// Remove all Doing entries so the column becomes empty
 		controller.data.data = entries.filter((e: any) => e.getValue(PROPERTY_STATUS)?.toString() !== 'Doing');
@@ -3662,10 +3762,10 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 
 		const doingCol = view.containerEl.querySelector('[data-column-value="Doing"]');
 		assert.ok(doingCol, 'Doing column should still exist in the DOM');
-		assert.ok(doingCol?.querySelector('.obk-column-remove-btn'), 'Remove button should appear on newly-emptied column');
+		assert.ok(hasRemoveColumnItem(view, 'Doing'), 'Remove column item should appear on newly-emptied column');
 	});
 
-	test('Remove button disappears when an entry arrives in an empty column', () => {
+	test('Remove column item disappears when an entry arrives in an empty column', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3678,10 +3778,7 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		assert.ok(
-			view.containerEl.querySelector('[data-column-value="In Progress"] .obk-column-remove-btn'),
-			'Remove button should be visible on empty column before data update',
-		);
+		assert.ok(hasRemoveColumnItem(view, 'In Progress'), 'Empty column should offer removal before data update');
 
 		// Add an In Progress entry
 		const newEntry = createMockBasesEntry(createMockTFile('Task 6.md'), {
@@ -3690,8 +3787,10 @@ describe('Empty Column Persistence - Remove button visibility', () => {
 		controller.data.data = [...entries, newEntry];
 		triggerDataUpdate(view);
 
-		const removeBtn = view.containerEl.querySelector('[data-column-value="In Progress"] .obk-column-remove-btn');
-		assert.ok(!removeBtn, 'Remove button should disappear when the column receives an entry');
+		assert.ok(
+			!hasRemoveColumnItem(view, 'In Progress'),
+			'Remove column item should disappear once the column has a card',
+		);
 	});
 });
 
@@ -3705,7 +3804,7 @@ describe('Empty Column Persistence - Remove column action', () => {
 		app = createMockApp();
 	});
 
-	test('Clicking remove button removes the column from the DOM', () => {
+	test('Remove column menu action removes the column from the DOM', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3718,20 +3817,15 @@ describe('Empty Column Persistence - Remove column action', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		const removeBtn = view.containerEl.querySelector(
-			'[data-column-value="In Progress"] .obk-column-remove-btn',
-		) as HTMLElement;
-		assert.ok(removeBtn, 'Precondition: remove button should exist');
-
-		removeBtn.click();
+		removeColumnViaMenu(view, 'In Progress');
 
 		assert.ok(
 			!view.containerEl.querySelector('[data-column-value="In Progress"]'),
-			'Column should be removed from DOM after clicking remove button',
+			'Column should be removed from DOM after the Remove column action',
 		);
 	});
 
-	test('Clicking remove button removes the column from saved order', () => {
+	test('Remove column menu action removes the column from saved order', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3744,14 +3838,14 @@ describe('Empty Column Persistence - Remove column action', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		(view.containerEl.querySelector('[data-column-value="In Progress"] .obk-column-remove-btn') as HTMLElement).click();
+		removeColumnViaMenu(view, 'In Progress');
 
 		const savedOrders = controller.config.get('columnOrders') as Record<string, string[]>;
 		const savedOrder = savedOrders?.[PROPERTY_STATUS] ?? [];
 		assert.ok(!savedOrder.includes('In Progress'), 'Removed column should not appear in saved order');
 	});
 
-	test('Clicking remove button does not affect other columns', () => {
+	test('Remove column menu action does not affect other columns', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3764,14 +3858,14 @@ describe('Empty Column Persistence - Remove column action', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		(view.containerEl.querySelector('[data-column-value="In Progress"] .obk-column-remove-btn') as HTMLElement).click();
+		removeColumnViaMenu(view, 'In Progress');
 
 		assert.ok(view.containerEl.querySelector('[data-column-value="To Do"]'), 'To Do column should remain');
 		assert.ok(view.containerEl.querySelector('[data-column-value="Doing"]'), 'Doing column should remain');
 		assert.ok(view.containerEl.querySelector('[data-column-value="Done"]'), 'Done column should remain');
 	});
 
-	test('Clicking remove button tears down the sortable instance for that column', () => {
+	test('Remove column menu action tears down the sortable instance for that column', () => {
 		const sortableMock = mockSortable();
 		(global as any).Sortable = sortableMock.Sortable;
 
@@ -3792,12 +3886,44 @@ describe('Empty Column Persistence - Remove column action', () => {
 			'Precondition: empty column should have a sortable instance',
 		);
 
-		(view.containerEl.querySelector('[data-column-value="In Progress"] .obk-column-remove-btn') as HTMLElement).click();
+		removeColumnViaMenu(view, 'In Progress');
 
 		assert.ok(
 			!(view as any)._columnSortables.has('In Progress'),
 			'Sortable instance should be removed after column is removed',
 		);
+	});
+
+	test('removing a temporarily-revealed hidden column clears it from hidden state', () => {
+		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' })];
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		controller.config.set('columnOrders', { [PROPERTY_STATUS]: ['To Do', 'Done'] });
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		// Hide the empty Done column
+		const doneColumn = view.containerEl.querySelector('[data-column-value="Done"]') as HTMLElement;
+		(view as any).openColumnMenu(new MouseEvent('click'), 'Done', doneColumn);
+		MockMenu.lastInstance?.items.find((item) => item.title === 'Hide column')?.onClick?.();
+		assert.ok((view as any)._prefs.hiddenColumns.has('Done'), 'Precondition: Done is hidden');
+
+		// Temporarily reveal it, then remove it via the menu
+		(view as any)._temporarilyShowHiddenColumns = true;
+		(view as any).render();
+		removeColumnViaMenu(view, 'Done');
+
+		assert.ok(!(view as any)._prefs.hiddenColumns.has('Done'), 'Removed column should be cleared from hiddenColumns');
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-hidden-columns-indicator'),
+			null,
+			'No stale hidden-columns pill should remain after removal',
+		);
+		const saved = controller.config.get('columnOrders') as Record<string, string[]>;
+		assert.ok(!saved[PROPERTY_STATUS].includes('Done'), 'Removed column should be gone from saved order');
 	});
 });
 
@@ -3917,7 +4043,7 @@ describe('Column persistence when group-by property disappears from allPropertie
 		assert.ok(columnValues.includes('Done'), 'Done should persist as empty column');
 	});
 
-	test('Each empty persisted column has a remove button', () => {
+	test('Each empty persisted column offers a Remove column item', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3933,8 +4059,8 @@ describe('Column persistence when group-by property disappears from allPropertie
 
 		const columns = view.containerEl.querySelectorAll('.obk-column');
 		columns.forEach((col) => {
-			const removeBtn = col.querySelector('.obk-column-remove-btn');
-			assert.ok(removeBtn, `Column "${col.getAttribute('data-column-value')}" should have a remove button`);
+			const value = col.getAttribute('data-column-value') ?? '';
+			assert.ok(hasRemoveColumnItem(view, value), `Column "${value}" should offer a Remove column item`);
 		});
 	});
 });
@@ -4325,6 +4451,36 @@ describe('Card Archive Context Menu', () => {
 		assert.ok(archiveItem, 'Archive item should exist for a non-archived card');
 	});
 
+	test('right-click on card opens context menu with Open in new tab item', () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'Card should exist');
+
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const openItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Open in new tab');
+		assert.ok(openItem, 'Menu should contain an Open in new tab item');
+	});
+
+	test('selecting Open in new tab opens the card file in a focused new tab', () => {
+		const file = createMockTFile('Projects/Task 1.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const view = setupStatusView(entries, { columnOrder: ['To Do'] });
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const openItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Open in new tab');
+		assert.ok(openItem?.onClick, 'Open in new tab item should have onClick');
+		openItem!.onClick!();
+
+		assert.strictEqual(app.workspace.getLeaf.calls.length, 1, 'A new tab leaf should be requested once');
+		assert.strictEqual(app.workspace.getLeaf.calls[0][0], 'tab', "getLeaf should be called with 'tab'");
+	});
+
 	test('no Archive item when no groupBy property is configured', () => {
 		// The view auto-selects the first available property when none is
 		// configured, so we exercise createCard directly with groupByPropertyId
@@ -4349,7 +4505,9 @@ describe('Card Archive Context Menu', () => {
 				onHoverPreview: () => {},
 				onSetActiveCard: () => {},
 				onOpenInBackgroundTab: () => {},
+				onOpenInNewTab: () => {},
 				onArchiveCard: () => {},
+				onUnarchiveCard: () => {},
 			},
 		);
 
@@ -4478,7 +4636,7 @@ describe('Card Archive Context Menu', () => {
 		);
 	});
 
-	test('no Unarchive item exists in the card menu', () => {
+	test('no Unarchive item on a non-archived card', () => {
 		const view = setupStatusView();
 		triggerDataUpdate(view);
 
@@ -4486,10 +4644,10 @@ describe('Card Archive Context Menu', () => {
 		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
 
 		const unarchiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Unarchive');
-		assert.strictEqual(unarchiveItem, undefined, 'No Unarchive item should exist');
+		assert.strictEqual(unarchiveItem, undefined, 'No Unarchive item should exist for a non-archived card');
 	});
 
-	test('no card menu shown for already-archived card', () => {
+	test('archived card menu shows Open in new tab and Unarchive but not Archive', () => {
 		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
 		const view = setupStatusView(entries, { columnOrder: [ARCHIVED_LABEL] });
 		triggerDataUpdate(view);
@@ -4500,8 +4658,70 @@ describe('Card Archive Context Menu', () => {
 
 		archivedCard.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
 
+		const openItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Open in new tab');
+		assert.ok(openItem, 'Open in new tab item should exist for archived card');
+		const unarchiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Unarchive');
+		assert.ok(unarchiveItem, 'Unarchive item should exist for archived card');
 		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
 		assert.strictEqual(archiveItem, undefined, 'No Archive item for already-archived card');
+	});
+
+	test('selecting Unarchive clears the groupBy property', () => {
+		const file = createMockTFile('Task 1.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
+		const view = setupStatusView(entries, { columnOrder: [ARCHIVED_LABEL] });
+		triggerDataUpdate(view);
+
+		const archivedCard = view.containerEl.querySelector('[data-column-value="Archived"] .obk-card') as HTMLElement;
+		archivedCard.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+		const unarchiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Unarchive');
+		unarchiveItem!.onClick!();
+
+		const frontmatter: Record<string, unknown> = { status: ARCHIVED_LABEL };
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.ok(!('status' in frontmatter), 'Unarchive should delete the groupBy property');
+	});
+
+	test('archiving shows an undo notice', async () => {
+		const view = setupStatusView();
+		triggerDataUpdate(view);
+
+		MockNotice.notices.length = 0;
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		archiveItem!.onClick!();
+
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		assert.ok(MockNotice.notices.length >= 1, 'An undo notice should be shown after archiving');
+	});
+
+	test('the archive notice Undo restores the previous column value', async () => {
+		const file = createMockTFile('Task 1.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const view = setupStatusView(entries, { columnOrder: ['To Do'] });
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		MockNotice.notices.length = 0;
+		const archiveItem = MockMenu.lastInstance?.items.find((item) => item.title === 'Archive');
+		archiveItem!.onClick!();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const message = MockNotice.notices[MockNotice.notices.length - 1] as DocumentFragment;
+		const undoLink = message.querySelector('a');
+		assert.ok(undoLink, 'The notice should contain an Undo link');
+
+		app.fileManager.processFrontMatter.calls.length = 0;
+		undoLink!.dispatchEvent(new MouseEvent('click'));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		assert.ok(app.fileManager.processFrontMatter.calls.length >= 1, 'Undo should write frontmatter');
+		const frontmatter: Record<string, unknown> = { status: ARCHIVED_LABEL };
+		app.fileManager.processFrontMatter.calls[0][1](frontmatter);
+		assert.strictEqual(frontmatter['status'], 'To Do', 'Undo should restore the previous column value');
 	});
 
 	test('archiving in swimlane mode writes only the groupBy property', () => {
@@ -4843,7 +5063,7 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		);
 	});
 
-	test('VAL-ARCHCOL-007: Hidden-columns indicator reflects the auto-hidden Archived column', () => {
+	test('VAL-ARCHCOL-007: auto-hidden Archived is reached via Show archived, not the hidden count', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
@@ -4851,17 +5071,18 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		const view = setupStatusView(entries);
 		triggerDataUpdate(view);
 
-		const indicator = view.containerEl.querySelector('.obk-hidden-columns-indicator');
-		assert.ok(indicator, 'Indicator should appear');
-		assert.strictEqual(indicator?.textContent, '1 hidden', 'Indicator should count Archived');
-
-		// Verify menu offers permanent unhide for Archived
-		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		assert.ok(showItem, 'Menu should offer Unhide: Archived');
+		// The built-in Archived column must not inflate the "N hidden" pill.
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-hidden-columns-indicator'),
+			null,
+			'Archived alone should not produce a hidden-columns count',
+		);
+		const archiveToggle = view.containerEl.querySelector('.obk-archived-toggle');
+		assert.ok(archiveToggle, 'A Show archived control should appear while Archived is hidden');
+		assert.strictEqual(archiveToggle?.textContent, 'Show archived');
 	});
 
-	test('VAL-ARCHCOL-008: Unhiding Archived from the context menu renders it pinned last', () => {
+	test('VAL-ARCHCOL-008: the Show archived control renders Archived pinned last', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
@@ -4869,16 +5090,14 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		const view = setupStatusView(entries);
 		triggerDataUpdate(view);
 
-		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		showItem?.onClick?.();
+		(view.containerEl.querySelector('.obk-archived-toggle') as HTMLElement).click();
 
 		const values = getRenderedColumnValues(view);
-		assert.ok(values.includes(ARCHIVED_LABEL), 'Archived should be rendered after unhide');
-		assert.strictEqual(values[values.length - 1], ARCHIVED_LABEL, 'Archived should be last after unhide');
+		assert.ok(values.includes(ARCHIVED_LABEL), 'Archived should be rendered after reveal');
+		assert.strictEqual(values[values.length - 1], ARCHIVED_LABEL, 'Archived should be last after reveal');
 	});
 
-	test('VAL-ARCHCOL-009: Once unhidden, Archived stays revealed across re-render', () => {
+	test('VAL-ARCHCOL-009: once revealed, Archived stays revealed across re-render', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
@@ -4886,10 +5105,7 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		const view = setupStatusView(entries);
 		triggerDataUpdate(view);
 
-		// Unhide Archived
-		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		showItem?.onClick?.();
+		(view.containerEl.querySelector('.obk-archived-toggle') as HTMLElement).click();
 
 		// Trigger more data updates
 		triggerDataUpdate(view);
@@ -4905,7 +5121,7 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		);
 	});
 
-	test('VAL-ARCHCOL-010: Re-hiding Archived via Hide column menu works', () => {
+	test('VAL-ARCHCOL-010: re-hiding Archived via Hide column brings back the Show archived control', () => {
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' }),
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL }),
@@ -4913,10 +5129,8 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 		const view = setupStatusView(entries);
 		triggerDataUpdate(view);
 
-		// Unhide Archived first
-		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		showItem?.onClick?.();
+		// Reveal Archived first
+		(view.containerEl.querySelector('.obk-archived-toggle') as HTMLElement).click();
 		assert.ok(
 			view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`),
 			'Precondition: Archived revealed',
@@ -4934,9 +5148,10 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 			'Archived should be hidden again',
 		);
 		assert.ok((view as any)._prefs.hiddenColumns.has(ARCHIVED_LABEL), 'Archived should be back in hiddenColumns');
-		const indicator = view.containerEl.querySelector('.obk-hidden-columns-indicator');
-		assert.ok(indicator, 'Indicator should reappear');
-		assert.strictEqual(indicator?.textContent, '1 hidden');
+		assert.ok(
+			view.containerEl.querySelector('.obk-archived-toggle'),
+			'Show archived control should reappear after re-hiding',
+		);
 	});
 
 	test('VAL-ARCHCOL-013: Archived is NOT auto-hidden when already present in saved columnOrder', () => {
@@ -4968,17 +5183,18 @@ describe('Archived Column Behavior - Hidden by Default', () => {
 			0,
 			'No visible columns when Archived is the only value and auto-hidden',
 		);
-		const indicator = view.containerEl.querySelector('.obk-hidden-columns-indicator');
-		assert.ok(indicator, 'Indicator should appear');
-		assert.strictEqual(indicator?.textContent, '1 hidden');
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-hidden-columns-indicator'),
+			null,
+			'Archived alone should not produce a hidden-columns count',
+		);
+		const archiveToggle = view.containerEl.querySelector('.obk-archived-toggle');
+		assert.ok(archiveToggle, 'Show archived control should appear');
 
-		// Unhide
-		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		showItem?.onClick?.();
+		(archiveToggle as HTMLElement).click();
 
 		const values = getRenderedColumnValues(view);
-		assert.deepStrictEqual(values, [ARCHIVED_LABEL], 'Unhidden Archived should be the only column');
+		assert.deepStrictEqual(values, [ARCHIVED_LABEL], 'Revealed Archived should be the only column');
 	});
 });
 
@@ -5016,29 +5232,27 @@ describe('Archived Column Behavior - Not Deletable', () => {
 		return view;
 	}
 
-	test('VAL-ARCHCOL-011: Archived shows NO remove (x) button when empty', () => {
+	test('VAL-ARCHCOL-011: Archived offers no Remove column menu item', () => {
 		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
 		const view = setupStatusView(entries, { columnOrder: [ARCHIVED_LABEL] });
 		triggerDataUpdate(view);
 
 		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
 		assert.ok(archivedColumn, 'Archived column should exist');
-		const removeBtn = archivedColumn.querySelector('.obk-column-remove-btn');
-		assert.strictEqual(removeBtn, null, 'Empty Archived should not have a remove button');
+		assert.ok(!hasRemoveColumnItem(view, ARCHIVED_LABEL), 'Archived should not offer a Remove column item');
 	});
 
-	test('VAL-ARCHCOL-012: Non-Archived empty column still shows its remove button (single-axis)', () => {
+	test('VAL-ARCHCOL-012: Non-Archived empty column still offers a Remove column item (single-axis)', () => {
 		const entries = [createMockBasesEntry(createMockTFile('Task 1.md'), { [PROPERTY_STATUS]: 'To Do' })];
 		const view = setupStatusView(entries, { columnOrder: ['To Do', 'Done', ARCHIVED_LABEL] });
 		triggerDataUpdate(view);
 
 		const doneColumn = view.containerEl.querySelector('[data-column-value="Done"]') as HTMLElement;
 		assert.ok(doneColumn, 'Done column should exist as empty saved column');
-		const removeBtn = doneColumn.querySelector('.obk-column-remove-btn');
-		assert.ok(removeBtn, 'Empty non-Archived column should have a remove button');
+		assert.ok(hasRemoveColumnItem(view, 'Done'), 'Empty non-Archived column should offer a Remove column item');
 	});
 
-	test('VAL-ARCHCOL-015: Edge - Archived emptied after last card removed keeps no remove button', () => {
+	test('VAL-ARCHCOL-015: Edge - Archived emptied after last card removed still offers no removal', () => {
 		const file = createMockTFile('Task 1.md');
 		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
 		const view = setupStatusView(entries, { columnOrder: [ARCHIVED_LABEL] });
@@ -5050,11 +5264,10 @@ describe('Archived Column Behavior - Not Deletable', () => {
 
 		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
 		assert.ok(archivedColumn, 'Archived column should persist even when empty');
-		const removeBtn = archivedColumn.querySelector('.obk-column-remove-btn');
-		assert.strictEqual(removeBtn, null, 'Emptied Archived should still have no remove button');
+		assert.ok(!hasRemoveColumnItem(view, ARCHIVED_LABEL), 'Emptied Archived should still offer no removal');
 	});
 
-	test('VAL-ARCHCOL-016: Patch-render path also withholds the Archived remove button', () => {
+	test('VAL-ARCHCOL-016: Patch-render path also withholds Archived removal', () => {
 		const file = createMockTFile('Task 1.md');
 		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
 		const view = setupStatusView(entries, { columnOrder: [ARCHIVED_LABEL] });
@@ -5066,8 +5279,7 @@ describe('Archived Column Behavior - Not Deletable', () => {
 
 		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
 		assert.ok(archivedColumn, 'Archived column should exist after patch');
-		const removeBtn = archivedColumn.querySelector('.obk-column-remove-btn');
-		assert.strictEqual(removeBtn, null, 'Patch path should not add remove button to Archived');
+		assert.ok(!hasRemoveColumnItem(view, ARCHIVED_LABEL), 'Patch path should not offer Archived removal');
 	});
 });
 
@@ -5238,9 +5450,15 @@ describe('Archived Column Behavior - Cross Flows', () => {
 			null,
 			'Archived column should be hidden on first appearance',
 		);
-		const indicator = view.containerEl.querySelector('.obk-hidden-columns-indicator');
-		assert.ok(indicator, 'Indicator should appear');
-		assert.ok(indicator?.textContent?.includes('1 hidden'));
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-hidden-columns-indicator'),
+			null,
+			'Archived should not inflate the hidden-columns count',
+		);
+		assert.ok(
+			view.containerEl.querySelector('.obk-archived-toggle'),
+			'A Show archived control should surface the newly-hidden Archived column',
+		);
 		assert.ok((view as any)._prefs.hiddenColumns.has(ARCHIVED_LABEL));
 	});
 
@@ -5353,12 +5571,11 @@ describe('Archived Column Behavior - Cross Flows', () => {
 
 		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
 		if (archivedColumn) {
-			const removeBtn = archivedColumn.querySelector('.obk-column-remove-btn');
-			assert.strictEqual(removeBtn, null, 'Empty Archived should not have remove button');
+			assert.ok(!hasRemoveColumnItem(view, ARCHIVED_LABEL), 'Empty Archived should not offer a Remove column item');
 		}
 	});
 
-	test('VAL-CROSS-011: Archiving the last card of a normal column leaves it empty-with-remove-button while Archived stays remove-button-free', () => {
+	test('VAL-CROSS-011: Archiving the last card of a normal column leaves it empty-and-removable while Archived stays non-removable', () => {
 		const file = createMockTFile('Task 1.md');
 		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'Doing' })];
 		const view = setupStatusView(entries, { columnOrder: ['Doing', ARCHIVED_LABEL] });
@@ -5377,18 +5594,11 @@ describe('Archived Column Behavior - Cross Flows', () => {
 		controller.data.data = [createMockBasesEntry(file, { [PROPERTY_STATUS]: ARCHIVED_LABEL })];
 		triggerDataUpdate(view);
 
-		const doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]') as HTMLElement;
-		const archivedColumn = view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`) as HTMLElement;
-
-		assert.ok(doingColumn.querySelector('.obk-column-remove-btn'), 'Doing should have remove button');
-		assert.strictEqual(
-			archivedColumn.querySelector('.obk-column-remove-btn'),
-			null,
-			'Archived should not have remove button',
-		);
+		assert.ok(hasRemoveColumnItem(view, 'Doing'), 'Emptied Doing column should offer a Remove column item');
+		assert.ok(!hasRemoveColumnItem(view, ARCHIVED_LABEL), 'Archived should never offer a Remove column item');
 	});
 
-	test('VAL-CROSS-012: Indicator counts both manually hidden and auto-hidden Archived', () => {
+	test('VAL-CROSS-012: hidden count reflects only user-hidden columns; Archived has its own control', () => {
 		const file = createMockTFile('Task 1.md');
 		const entries = [
 			createMockBasesEntry(createMockTFile('Task 2.md'), { [PROPERTY_STATUS]: 'Done' }),
@@ -5417,21 +5627,27 @@ describe('Archived Column Behavior - Cross Flows', () => {
 
 		const indicator = view.containerEl.querySelector('.obk-hidden-columns-indicator');
 		assert.ok(indicator);
-		assert.strictEqual(indicator?.textContent, '2 hidden', 'Indicator should count both hidden sources');
+		assert.strictEqual(indicator?.textContent, '1 hidden', 'Only the user-hidden Done column should be counted');
+		const archiveToggle = view.containerEl.querySelector('.obk-archived-toggle');
+		assert.ok(archiveToggle, 'Archived should be reachable via its own Show archived control');
 
-		// Verify menu has both permanent unhide actions
+		// The hidden-columns menu lists only user-hidden columns, not the built-in Archived.
 		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
 		const showDone = MockMenu.lastInstance?.items.find((item) => item.title === 'Unhide: Done');
 		const showArchived = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		assert.ok(showDone, 'Menu should have Unhide: Done');
-		assert.ok(showArchived, 'Menu should have Unhide: Archived');
+		assert.ok(showDone, 'Menu should offer Unhide: Done');
+		assert.strictEqual(showArchived, undefined, 'Menu should not list the built-in Archived column');
 
-		// Unhide only Archived
-		showArchived?.onClick?.();
+		// Reveal Archived via its own control; Done stays hidden and still counted.
+		(archiveToggle as HTMLElement).click();
 		const indicatorAfter = view.containerEl.querySelector('.obk-hidden-columns-indicator');
 		assert.ok(indicatorAfter);
-		assert.strictEqual(indicatorAfter?.textContent, '1 hidden', 'Only Done should remain hidden');
+		assert.strictEqual(indicatorAfter?.textContent, '1 hidden', 'Only Done should remain counted as hidden');
 		assert.strictEqual(view.containerEl.querySelector('[data-column-value="Done"]'), null, 'Done should still be hidden');
+		assert.ok(
+			view.containerEl.querySelector(`[data-column-value="${ARCHIVED_LABEL}"]`),
+			'Archived should now be visible after using its control',
+		);
 	});
 
 	test('VAL-CROSS-014: Unarchiving by cross-cell drag still writes the destination value under an active sort', async () => {
@@ -5660,10 +5876,6 @@ describe('Move Column To End', () => {
 			null,
 			'Archived should not expose the Sortable column drag handle',
 		);
-		assert.ok(
-			archivedColumn.querySelector(`.${CSS_CLASSES.COLUMN_DRAG_HANDLE_DISABLED}`),
-			'Archived should render a disabled drag marker for layout consistency',
-		);
 	});
 
 	test('VAL-MOVECOL-009: Edge - single non-Archived column with Archived is a no-op', () => {
@@ -5820,16 +6032,14 @@ describe('Move Column To End', () => {
 		const toDoColumn = view.containerEl.querySelector('[data-column-value="To Do"]') as HTMLElement;
 		moveColumnToEndViaMenu(view, 'To Do', toDoColumn);
 
-		// Unhide Archived
-		(view as any).openHiddenColumnsMenu(new MouseEvent('click'));
-		const showItem = MockMenu.lastInstance?.items.find((item) => item.title === `Unhide: ${ARCHIVED_LABEL}`);
-		showItem?.onClick?.();
+		// Reveal Archived via its Show archived control
+		(view.containerEl.querySelector('.obk-archived-toggle') as HTMLElement).click();
 
 		const values = getRenderedColumnValues(view);
 		assert.deepStrictEqual(
 			values,
 			['Doing', 'To Do', ARCHIVED_LABEL],
-			'After unhiding Archived, it should still be absolute-last',
+			'After revealing Archived, it should still be absolute-last',
 		);
 	});
 });
@@ -5878,7 +6088,7 @@ describe('Global Preview Settings Integration', () => {
 		await waitForBodyPreviewRender();
 
 		const preview = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(preview?.textContent, 'abcdefghij');
+		assert.strictEqual(preview?.textContent, 'abcdefghij…');
 	});
 
 	test('VAL-PREVIEW-002: global disable hides previews everywhere', async () => {
@@ -5927,7 +6137,7 @@ describe('Global Preview Settings Integration', () => {
 		await waitForBodyPreviewRender();
 
 		const preview = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(preview?.textContent, 'abcde');
+		assert.strictEqual(preview?.textContent, 'abcde…');
 	});
 
 	test('VAL-PREVIEW-005: per-base zero disables that base when globally enabled', async () => {
@@ -5985,7 +6195,7 @@ describe('Global Preview Settings Integration', () => {
 		await waitForBodyPreviewRender();
 
 		const preview = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(preview?.textContent, 'abcdefghijklmno');
+		assert.strictEqual(preview?.textContent, 'abcdefghijklmno…');
 	});
 });
 
@@ -6013,7 +6223,7 @@ describe('VAL-CROSS-001: Persisted settings affect newly created views', () => {
 		await waitForBodyPreviewRender();
 
 		const preview = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(preview?.textContent, 'abcdefgh');
+		assert.strictEqual(preview?.textContent, 'abcdefgh…');
 	});
 
 	test('newly created view with disabled previews hides them', async () => {
@@ -6095,7 +6305,7 @@ describe('VAL-CROSS-002: Settings changes affect open views', () => {
 		await waitForBodyPreviewRender();
 
 		const previewBefore = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(previewBefore?.textContent, 'abcde');
+		assert.strictEqual(previewBefore?.textContent, 'abcde…');
 
 		// Mutate the shared settings object
 		pluginSettings.defaultTextPreviewLength = 8;
@@ -6103,6 +6313,44 @@ describe('VAL-CROSS-002: Settings changes affect open views', () => {
 		await waitForBodyPreviewRender();
 
 		const previewAfter = view.containerEl.querySelector('.obk-card-preview');
-		assert.strictEqual(previewAfter?.textContent, 'abcdefgh');
+		assert.strictEqual(previewAfter?.textContent, 'abcdefgh…');
+	});
+
+	test('firing the settings-changed workspace event re-renders an open view', async () => {
+		const scrollEl = createDivWithMethods();
+		const file = createMockTFile('Task Preview.md');
+		const entries = [createMockBasesEntry(file, { [PROPERTY_STATUS]: 'To Do' })];
+		const app = createMockApp({}, { [file.path]: 'abcdefghijklmnopqrstuvwxyz' });
+
+		// Give the mock workspace a minimal event bus so the view's guarded
+		// subscription actually wires up (the default mock has no on/offref).
+		const handlers: Record<string, Array<() => void>> = {};
+		(app.workspace as any).on = (name: string, cb: () => void) => {
+			(handlers[name] ??= []).push(cb);
+			return { name, cb };
+		};
+		(app.workspace as any).offref = () => {};
+
+		const controller = createMockQueryController(entries, TEST_PROPERTIES) as any;
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) => (key === 'groupByProperty' ? PROPERTY_STATUS : null);
+		const pluginSettings: KanbanPluginSettings = { textPreviewEnabled: true, defaultTextPreviewLength: 20 };
+
+		const view = new KanbanView(controller, scrollEl, null, pluginSettings);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+		await waitForBodyPreviewRender();
+		assert.ok(view.containerEl.querySelector('.obk-card-preview'), 'Preview should be visible initially');
+
+		// Mutate the shared settings object and fire the event (no data update).
+		pluginSettings.textPreviewEnabled = false;
+		(handlers[SETTINGS_CHANGED_EVENT] ?? []).forEach((cb) => cb());
+		await waitForBodyPreviewRender();
+
+		assert.strictEqual(
+			view.containerEl.querySelector('.obk-card-preview'),
+			null,
+			'The settings-changed event alone should re-render and hide previews',
+		);
 	});
 });

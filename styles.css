@@ -8,41 +8,6 @@
 	overflow: hidden;
 }
 
-/* Property Selector */
-.obk-property-selector {
-	margin-bottom: 15px;
-	padding: 10px;
-	background: var(--background-secondary);
-	border-radius: 6px;
-	display: flex;
-	align-items: center;
-	gap: 10px;
-}
-
-.obk-property-label {
-	font-weight: 500;
-	color: var(--text-normal);
-}
-
-.obk-property-select {
-	padding: 6px 12px;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 4px;
-	background: var(--background-primary);
-	color: var(--text-normal);
-	font-size: 14px;
-	cursor: pointer;
-}
-
-.obk-property-select:hover {
-	border-color: var(--interactive-hover);
-}
-
-.obk-property-select:focus {
-	outline: 2px solid var(--interactive-accent);
-	outline-offset: 2px;
-}
-
 /* Empty State */
 .obk-empty-state {
 	padding: 40px 20px;
@@ -79,9 +44,18 @@
 	background: var(--background-modifier-border-hover);
 }
 
-.obk-hidden-columns-indicator {
+/* Board toolbar: sits above the columns, holds the hidden-columns pill and
+   the show-archived control in both flat and swimlane modes. */
+.obk-board-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	flex-shrink: 0;
-	align-self: flex-start;
+	margin-bottom: 8px;
+}
+
+.obk-hidden-columns-indicator,
+.obk-archived-toggle {
 	font-size: 12px;
 	color: var(--text-muted);
 	background: var(--background-modifier-border);
@@ -94,9 +68,23 @@
 		color 0.1s ease;
 }
 
-.obk-hidden-columns-indicator:hover {
+.obk-hidden-columns-indicator:hover,
+.obk-archived-toggle:hover {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
+}
+
+.obk-hidden-columns-indicator:focus-visible,
+.obk-archived-toggle:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: 2px;
+}
+
+/* Undo link inside the archive notice */
+.obk-notice-undo {
+	cursor: pointer;
+	text-decoration: underline;
+	margin-left: 4px;
 }
 
 /* Swimlane mode: stack lanes vertically. The lane body becomes the
@@ -127,7 +115,6 @@
 	font-weight: 600;
 	font-size: 13px;
 	color: var(--text-normal);
-	text-transform: capitalize;
 	flex-shrink: 0;
 }
 
@@ -283,7 +270,8 @@
 	gap: 8px;
 }
 
-/* Column color picker button */
+/* Column color picker button — part of the right-aligned control cluster,
+   revealed on column hover/focus like the add and menu buttons. */
 .obk-column-color-btn {
 	width: 16px;
 	height: 16px;
@@ -292,14 +280,22 @@
 	background: var(--obk-column-accent-color, transparent);
 	cursor: pointer;
 	flex-shrink: 0;
+	opacity: 0.55;
 	transition:
 		transform 0.1s ease,
-		border-color 0.1s ease;
+		border-color 0.1s ease,
+		opacity 0.1s ease;
+}
+
+.obk-column:hover .obk-column-color-btn,
+.obk-column-color-btn:focus-visible {
+	opacity: 1;
 }
 
 .obk-column-color-btn:hover {
 	border-color: var(--text-muted);
 	transform: scale(1.15);
+	opacity: 1;
 }
 
 /* Color picker popover */
@@ -388,7 +384,6 @@
 	font-weight: 600;
 	font-size: 14px;
 	color: var(--text-normal);
-	text-transform: capitalize;
 }
 
 .obk-column-count {
@@ -400,8 +395,7 @@
 }
 
 .obk-column-add-btn,
-.obk-column-menu-btn,
-.obk-column-remove-btn {
+.obk-column-menu-btn {
 	width: 24px;
 	height: 24px;
 	border-radius: 4px;
@@ -430,8 +424,7 @@
 }
 
 .obk-column-add-btn:hover,
-.obk-column-menu-btn:hover,
-.obk-column-remove-btn:hover {
+.obk-column-menu-btn:hover {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
 }
@@ -443,11 +436,6 @@
 
 .obk-column-menu-btn {
 	font-size: 16px;
-	line-height: 1;
-}
-
-.obk-column-remove-btn {
-	font-size: 18px;
 	line-height: 1;
 }
 

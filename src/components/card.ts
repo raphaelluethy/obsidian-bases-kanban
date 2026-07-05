@@ -14,13 +14,17 @@ export interface CardRenderCtx {
 	wrapValues: boolean;
 	order: BasesPropertyId[];
 	getDisplayName: (id: BasesPropertyId) => string;
+	bodyPreviewLength?: number;
+	bodyPreviews?: Map<string, string>;
 }
 
 export interface CardCallbacks {
 	onHoverPreview: (linktext: string, sourcePath: string, event: MouseEvent, targetEl: HTMLElement) => void;
 	onSetActiveCard: (path: string | null) => void;
 	onOpenInBackgroundTab: (file: TFile) => void;
+	onOpenInNewTab: (file: TFile) => void;
 	onArchiveCard: (file: TFile, columnValue: string) => void;
+	onUnarchiveCard: (file: TFile) => void;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -37,6 +41,9 @@ export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): s
 	if (ctx.imagePropertyId) {
 		const val = entry.getValue(ctx.imagePropertyId);
 		parts.push(val === null ? '' : val.toString());
+	}
+	if ((ctx.bodyPreviewLength ?? 0) > 0) {
+		parts.push(ctx.bodyPreviews?.get(entry.file.path) ?? '');
 	}
 	return parts.join('\x00');
 }
@@ -107,6 +114,11 @@ export function createCard(entry: BasesEntry, columnValue: string, ctx: CardRend
 	const titleEl = cardEl.createDiv({ cls: CSS_CLASSES.CARD_TITLE });
 	renderCardTitle(titleEl, entry, ctx);
 
+	const bodyPreview = (ctx.bodyPreviewLength ?? 0) > 0 ? ctx.bodyPreviews?.get(filePath) : null;
+	if (bodyPreview) {
+		cardEl.createDiv({ text: bodyPreview, cls: CSS_CLASSES.CARD_PREVIEW });
+	}
+
 	for (const propertyId of ctx.order) {
 		if (propertyId === ctx.groupByPropertyId) continue;
 		const value = entry.getValue(propertyId);
@@ -156,16 +168,34 @@ export function createCard(entry: BasesEntry, columnValue: string, ctx: CardRend
 	});
 
 	cardEl.addEventListener('contextmenu', (e) => {
-		if (!ctx.groupByPropertyId || columnValue === ARCHIVED_LABEL) return;
 		e.preventDefault();
 		const menu = new Menu();
 		menu.addItem((item) => {
-			item.setTitle('Archive');
-			item.setIcon('archive');
+			item.setTitle('Open in new tab');
+			item.setIcon('file-plus');
 			item.onClick(() => {
-				cb.onArchiveCard(entry.file, columnValue);
+				cb.onOpenInNewTab(entry.file);
 			});
 		});
+		if (ctx.groupByPropertyId) {
+			if (columnValue === ARCHIVED_LABEL) {
+				menu.addItem((item) => {
+					item.setTitle('Unarchive');
+					item.setIcon('archive-restore');
+					item.onClick(() => {
+						cb.onUnarchiveCard(entry.file);
+					});
+				});
+			} else {
+				menu.addItem((item) => {
+					item.setTitle('Archive');
+					item.setIcon('archive');
+					item.onClick(() => {
+						cb.onArchiveCard(entry.file, columnValue);
+					});
+				});
+			}
+		}
 		menu.showAtMouseEvent(e);
 	});
 

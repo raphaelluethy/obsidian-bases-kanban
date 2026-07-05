@@ -361,4 +361,31 @@ describe('Legacy Data Compatibility', () => {
 		assert.strictEqual(plugin.settings.textPreviewEnabled, false);
 		assert.strictEqual(plugin.settings.defaultTextPreviewLength, 10);
 	});
+
+	test('saveSettings preserves legacy column data instead of clobbering plugin.data.json', async () => {
+		const stored = {
+			columnOrders: { 'note.status': ['Done', 'Doing', 'To Do'] },
+			columnColors: { 'note.status': { 'To Do': 'red' } },
+		};
+
+		const plugin = new KanbanBasesViewPlugin({} as App, {} as any);
+		plugin.loadData = async () => stored;
+		plugin.registerBasesView = () => true as any;
+		plugin.registerHoverLinkSource = () => {};
+
+		const saved: unknown[] = [];
+		plugin.saveData = async (data: unknown) => {
+			saved.push(data);
+		};
+
+		await plugin.onload();
+		plugin.settings.defaultTextPreviewLength = 42;
+		await plugin.saveSettings();
+
+		assert.strictEqual(saved.length, 1, 'saveSettings should persist once');
+		const written = saved[0] as Record<string, unknown>;
+		assert.deepStrictEqual(written.columnOrders, stored.columnOrders, 'Legacy columnOrders must survive a settings save');
+		assert.deepStrictEqual(written.columnColors, stored.columnColors, 'Legacy columnColors must survive a settings save');
+		assert.strictEqual(written.defaultTextPreviewLength, 42, 'New setting value should be written');
+	});
 });
